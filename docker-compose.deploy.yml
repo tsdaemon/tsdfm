@@ -1,0 +1,60 @@
+services:
+  app:
+    build: ./app
+    depends_on:
+      - liquidsoap
+    environment:
+      NAVIDROME_URL: ${NAVIDROME_URL}
+      NAVIDROME_USERNAME: ${NAVIDROME_USERNAME}
+      NAVIDROME_PASSWORD: ${NAVIDROME_PASSWORD}
+      LIQUIDSOAP_HOST: liquidsoap
+      LIQUIDSOAP_PORT: 1234
+      ICECAST_STREAM_URL: ${ICECAST_STREAM_URL}
+      # Deliberately a different .env key than local dev's INVITE_TOKEN, so the
+      # deployed room's invite link can never silently fall back to (or share)
+      # your local test room's token - see docs/architecture.md.
+      INVITE_TOKEN: ${DEPLOY_INVITE_TOKEN}
+      # Named volume, deliberately not a host path - matches the local-dev
+      # rule of keeping every writer on its own STATE_PATH.
+      STATE_PATH: /data/room-state.json
+    volumes:
+      - room-state:/data
+    ports:
+      - "${APP_PORT:-6490}:${APP_PORT:-6490}"
+    restart: unless-stopped
+    # Configurable (APP_PORT in .env.deploy) rather than the Dockerfile's
+    # default 8080, just to keep it visually distinct from other services'
+    # internal ports when eyeballing configs - Traefik reaches containers over
+    # the docker network either way, so this never actually collides with
+    # anything on the host.
+    command: ["uvicorn", "tsdfm.main:app", "--host", "0.0.0.0", "--port", "${APP_PORT:-6490}"]
+    labels:
+      # Discovered by the NAS's Traefik over the docker socket - no shared
+      # network needed, see https://github.com/tsdaemon/theseus traefik role.
+      # web_local only, not web/websecure+letsencrypt - public HTTPS is
+      # Cloudflare's job (Tunnel or proxy in front), not Traefik's, here.
+      traefik.enable: "true"
+      traefik.http.routers.tsdfm.rule: "Host(`${APP_HOSTNAME_LOCAL}`)"
+      traefik.http.routers.tsdfm.entrypoints: "web_local"
+      traefik.http.services.tsdfm.loadbalancer.server.port: "${APP_PORT:-6490}"
+      # Homepage dashboard tile - queried over the same local route above, so
+      # no extra port or network wiring is needed.
+      homepage.group: Applications
+      homepage.name: tsdfm
+      homepage.icon: "http://${APP_HOSTNAME_LOCAL}/static/icon/android-chrome-192x192.png"
+      homepage.href: "http://${APP_HOSTNAME_LOCAL}"
+      homepage.description: Turntable.fm-style radio for friends
+      homepage.widget.type: customapi
+      homepage.widget.url: "http://${APP_HOSTNAME_LOCAL}/api/stats"
+      homepage.widget.mappings[0].field: listeners
+      homepage.widget.mappings[0].label: Listeners
+      homepage.widget.mappings[0].format: number
+
+  liquidsoap:
+    # Base file publishes 127.0.0.1:1234 only for task dev's host-run app to
+    # reach it - here app is a container on the same compose network and
+    # reaches it by service name (liquidsoap:1234), so drop the publish.
+    ports: !reset []
+
+volumes:
+  room-state:

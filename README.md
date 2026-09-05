@@ -23,7 +23,8 @@ trick: there is one live stream and browsers tune into it.
 - Docker + Docker Compose
 - [go-task](https://taskfile.dev) for the commands below
 - An existing **Navidrome** instance with your music (this stack does not run or manage it)
-- [uv](https://docs.astral.sh/uv/) if you want to run the app outside Docker for development
+- [uv](https://docs.astral.sh/uv/) to run the app itself (it never runs in local Docker —
+  see [Running it](#running-it) below)
 
 ## Setup
 
@@ -42,15 +43,18 @@ Edit `.env`:
 - Set `APP_PUBLIC_URL` the same way, so invite links print correctly.
 - Leave `INVITE_TOKEN` blank; it gets generated on first `task invite`.
 
-Then:
+## Running it
 
 ```bash
-task up        # build and start icecast + liquidsoap + app
+task dev       # icecast + liquidsoap in docker, app on the host with hot reload
 task invite    # prints the link to share
 ```
 
 Open the printed link. You'll be asked for a display name once, then you're in the room.
 Hit **Step up to DJ**, search your library, and queue something.
+
+For anything past your own machine — a server your friends can actually reach — see
+[Deploying](#deploying).
 
 ## Inviting people
 
@@ -70,13 +74,9 @@ person means rotating `INVITE_TOKEN` and re-sharing the link. That's the tradeof
 ## Commands
 
 ```bash
-task up          # full stack in docker
-task down        # stop it
-task restart     # rebuild + restart just the app
-task logs        # tail everything
-task invite      # print the invite link
-
 task dev         # app on host with hot reload, icecast/liquidsoap in docker
+task invite      # print the invite link
+task deploy      # build + start the full stack on a remote server, see below
 task test        # unit tests (~6s, no services needed)
 task test:e2e    # end-to-end against a running stack
 task --list      # the rest
@@ -99,6 +99,42 @@ why playback survives an app restart, and why everyone is in sync for free.
 Full diagrams and the reasoning behind the fiddly parts are in
 [`docs/architecture.md`](docs/architecture.md).
 
+## Deploying
+
+`task dev` is for your own machine only — the app isn't exposed anywhere. To put this in
+front of friends, you need a server; `docker-compose.deploy.yml` assumes
+[Traefik](https://traefik.io) discovering services via Docker labels for a friendly local
+hostname (this was built against
+[this Traefik setup](https://github.com/tsdaemon/theseus/tree/main/roles/services/traefik),
+adjust the labels if yours differs). **Public HTTPS exposure is not Traefik's job here** —
+it assumes something in front (a Cloudflare Tunnel, a proxy, whatever you already use)
+terminates TLS and forwards to the NAS; Traefik only routes it once it's on the LAN.
+
+```bash
+cp .env.deploy.example .env.deploy
+```
+
+Edit `.env.deploy` the same way as `.env` (see [Setup](#setup)), plus:
+
+- `APP_HOSTNAME` — the LAN-local hostname Traefik should route to the app (plain HTTP).
+- `APP_PUBLIC_URL` — the URL friends actually use, from whatever fronts it publicly. Not
+  necessarily the same host as `APP_HOSTNAME` — only used to print invite links.
+
+Then, with a [Docker context](https://docs.docker.com/engine/context/working-with-contexts/)
+named `theseus` pointed at the server over SSH:
+
+```bash
+task deploy        # builds on the remote daemon and starts icecast + liquidsoap + app
+task deploy:logs   # tail it
+task deploy:down   # stop it
+```
+
+`task deploy` runs `docker compose` against both `docker-compose.yml` (icecast +
+liquidsoap, same as local) and `docker-compose.deploy.yml` (adds the `app` service, its
+Traefik router labels, and a [Homepage](https://gethomepage.dev) dashboard widget showing
+the live listener count via `GET /api/stats`). Icecast's audio port is still published
+directly rather than routed through Traefik — see `docs/architecture.md`.
+
 ## Development
 
 The app is a [uv](https://docs.astral.sh/uv/) project (`app/`, src layout at
@@ -120,14 +156,17 @@ gotchas worth knowing before touching the playback path.
 ## Limitations
 
 - **One room.** No multi-room support, by design.
-- **State is in-memory.** Restarting the app clears queues and the DJ rotation. The audio
-  keeps playing (Liquidsoap and Icecast are untouched), but the room resets — worth knowing
-  before you redeploy mid-session.
-- **Anyone with the link is in.** The invite token is the only access control, and the app
-  speaks plain HTTP — put it behind a reverse proxy with TLS if it's exposed beyond a LAN
-  or tunnel.
-- **Bandwidth is on you.** Roughly 192 kbps per listener (~86 MB/hour each), so a dozen
-  friends need about 2 Mbps of upload. Fine for a home connection, not a public station.
+- **State is a single JSON file, not a database.** Queues, rotation and chat are mirrored
+  to disk and restored on restart, and the app re-attaches to whatever Liquidsoap is still
+  broadcasting. Fine for one instance; two app processes sharing one state file would
+  clobber each other.
+- **Anyone with the link is in.** The invite token is the only access control. The app
+  itself speaks plain HTTP with no TLS of its own — `task deploy` only routes it locally
+  on the LAN; whatever exposes it publicly (see [Deploying](#deploying)) must terminate
+  HTTPS in front of it.
+- **Bandwidth is on you.** `STREAM_BITRATE` defaults to 320 kbps — about 144 MB/hour per
+  listener, so a dozen friends need roughly 4 Mbps of upload. Drop it to 192 (~86 MB/hour,
+  ~2 Mbps) if that's tight. Fine for a home connection, not a public station.
 
 ## A note on what you're broadcasting
 

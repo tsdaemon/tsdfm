@@ -5,6 +5,7 @@ import secrets
 import time
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
@@ -59,8 +60,27 @@ ICECAST_STREAM_URL = os.environ["ICECAST_STREAM_URL"]
 INVITE_TOKEN = os.environ.get("INVITE_TOKEN") or None
 if not INVITE_TOKEN:
     raise RuntimeError("INVITE_TOKEN is not set - run `task invite` to generate one")
+STATE_PATH = Path(os.environ.get("STATE_PATH", Path.cwd() / "room-state.json"))
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Reloads and redeploys shouldn't cost anyone their queue, and liquidsoap keeps
+    # broadcasting while we're down - so pick both back up rather than starting fresh.
+    try:
+        await room.resume()
+    except Exception:
+        # A liquidsoap hiccup at boot must never stop the app from serving; the sync
+        # loop will reconcile as soon as it can reach it.
+        logger.exception("Could not restore room state - starting empty")
+    room.start()
+    try:
+        yield
+    finally:
+        await room.stop()
+
+
+app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory=str(STATIC_DIR))
 
 navidrome = NavidromeClient(NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWORD)
@@ -80,7 +100,9 @@ async def broadcast(message: dict):
         active_sockets.pop(uid, None)
 
 
-room = Room(liquidsoap=liquidsoap, navidrome=navidrome, broadcast=broadcast)
+room = Room(
+    liquidsoap=liquidsoap, navidrome=navidrome, broadcast=broadcast, state_path=STATE_PATH
+)
 
 
 ASSET_VERSION = str(int(time.time()))
@@ -112,6 +134,13 @@ async def search(q: str):
 @app.get("/api/logs")
 async def get_logs():
     return list(log_buffer)
+
+
+@app.get("/api/stats")
+async def stats():
+    # Unauthenticated on purpose - a listener count isn't sensitive, and this is
+    # what the homepage dashboard widget polls (see docker-compose.deploy.yml).
+    return {"listeners": len(active_sockets)}
 
 
 @app.websocket("/ws")

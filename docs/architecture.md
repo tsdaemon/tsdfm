@@ -28,7 +28,7 @@ flowchart LR
         Liquidsoap["Liquidsoap<br/>decode + encode"]
         Icecast["Icecast<br/>/radio.mp3"]
         Navidrome -->|"HTTP: FLAC/MP3 file"| Liquidsoap
-        Liquidsoap -->|"MP3 192kbps source"| Icecast
+        Liquidsoap -->|"MP3 source (STREAM_BITRATE)"| Icecast
     end
 
     App -.->|"telnet :1234<br/>queue.push &lt;url&gt;"| Liquidsoap
@@ -48,9 +48,9 @@ arrow — a useful sanity check when reasoning about a change.
 
 | Piece | Role | Port |
 |---|---|---|
-| **app** (FastAPI) | Room state, DJ rotation, chat, invite auth, Navidrome search proxy | 8080 |
+| **app** (FastAPI) | Room state, DJ rotation, chat, invite auth, Navidrome search proxy | 8080 (`task dev`/Dockerfile default; deploy overrides to `APP_PORT`, default 6490) |
 | **liquidsoap** | Fetches + decodes tracks, encodes one continuous MP3 stream | 1234 (telnet, localhost only) |
-| **icecast** | Broadcasts that stream to listeners | 8000 |
+| **icecast** | Broadcasts that stream to listeners | `ICECAST_PORT`, default 6491 |
 | **navidrome** | The music library (external — you run it separately) | 4533 |
 
 Liquidsoap's whole program is small enough to read at a glance:
@@ -59,7 +59,8 @@ Liquidsoap's whole program is small enough to read at a glance:
 queue  = request.queue(id="queue")          # we push one track at a time
 silence = blank(duration=5.)                 # played when the queue runs dry
 radio  = fallback(track_sensitive=false, [queue, silence])
-output.icecast(%mp3(bitrate=192), mount="radio.mp3", ..., radio)
+bitrate = int_of_string(environment.get(default="320", "STREAM_BITRATE"))
+output.icecast(%mp3(bitrate=bitrate), mount="radio.mp3", ..., radio)
 ```
 
 The `fallback` is what keeps the Icecast source connected during dead air — without it,
@@ -96,65 +97,95 @@ sequenceDiagram
 
     LS->>ND: GET /rest/stream?id=...
     ND-->>LS: audio (often FLAC)
-    LS->>LS: decode → PCM → MP3 192k
+    LS->>LS: decode → PCM → MP3 (STREAM_BITRATE)
     LS->>IC: source data on mount /radio.mp3
     IC-->>All: audio stream
 ```
 
 Two things worth internalising:
 
-- Step 8 (`state {now_playing}`) fires **before** Liquidsoap has actually started
-  decoding. The UI is optimistic by a second or two; Icecast's own metadata is the
-  ground truth about what is genuinely on air.
+- Step 8 (`state {now_playing}`) reports the track as **cueing**, not playing. The app
+  never claims something is on air until Liquidsoap says so — see
+  [Knowing when a track ended](#knowing-when-a-track-ended-the-subtle-part).
 - The stream URL embeds Subsonic token auth (`t = md5(password + salt)`), so the raw
   Navidrome password is never in the URL — but the URL *is* a capability. It's only ever
   sent to Liquidsoap over the local network, never to browsers.
 
 ## Knowing when a track ended (the subtle part)
 
-This is where the design earned its scars. The obvious approach — sleep for the track's
-duration — is wrong, because the duration comes from Navidrome's file metadata, and a
-mistagged file lies. When it lies short, the app declares "Nothing playing" while audio
-is still going; the room appears to hang until someone hits skip.
+This is where the design earned its scars, through three failed attempts:
 
-The fix: ask Liquidsoap, which knows what it's actually decoding.
+1. **Sleep for the track's duration.** Wrong: duration comes from file tags, and a
+   mistagged file lies. When it lies short the app announced "Nothing playing" while audio
+   kept going, and the room appeared to hang until someone hit skip.
+2. **Wait for Icecast's title to change.** Deadlocks: the title only changes when *we*
+   push something new, so "wait for it to change before pushing" waits forever.
+3. **Infer from `remaining()` alone.** `remaining()` reports whatever the *output* is
+   playing — it never says *which request* that is. Just after a push it still describes
+   the previous track's tail or the silence loop, so an early poll reads a number near
+   zero and concludes the brand-new track is already over. The app then pushed the next
+   one and ran a whole track ahead of the audio, permanently, because Liquidsoap's queue
+   is FIFO and simply played them in order.
+
+**The rule now: the app never infers playback state, it observes it.** Every push is
+tagged with an id of our own via Liquidsoap's `annotate:` protocol, and three cheap reads
+answer everything unambiguously:
+
+| Observation | Meaning |
+|---|---|
+| our rid appears in `queue.queue` | cueing — accepted, not yet audible |
+| our rid exists but is *not* in `queue.queue` | **on air** |
+| `request.metadata <rid>` comes back empty | finished, or failed to resolve |
+| `output.icecast.remaining` | seconds left, straight from the decoder |
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant App as _advance_after()
+    participant App as _sync_once() — every 1s
     participant LS as Liquidsoap
 
-    Note over App: track just pushed
-    App->>App: sleep SETTLE_SECONDS (3s)<br/>let LS actually start decoding
-    loop until remaining ≤ 1.5s, or 20min safety cap
-        App->>LS: telnet: output.icecast.remaining
-        LS-->>App: e.g. "128.4"
-        App->>App: sleep min(2s, remaining − 1.5)
+    App->>LS: request.metadata <rid>
+    alt no such request
+        LS-->>App: (empty)
+        Note over App: it finished →<br/>now_playing = None, start next
+    else still ours
+        LS-->>App: status, tsdfm_id=...
+        App->>LS: queue.queue
+        LS-->>App: pending rids
+        alt our rid is pending
+            Note over App: cueing — on_air = false
+        else not pending
+            App->>LS: output.icecast.remaining
+            LS-->>App: e.g. "128.4"
+            Note over App: on air — publish title + remaining
+        end
     end
-    Note over App: now_playing = None<br/>→ _maybe_start_next()
 ```
 
 Design notes, each of which is a bug that was actually hit:
 
-- **The settle delay is not cosmetic.** Poll immediately after a push and you may read
-  the *previous* content's tail (or the 5s silence loop) and instantly conclude the new
-  track is over.
-- **`remaining() == None` means "unknown", not "finished".** A failed telnet read must
-  retry, or a transient blip cuts a song short.
-- **The safety cap must not be derived from the reported duration.** An earlier version
-  capped the wait at `duration * 3`; with a duration of 5s against a real 201s track, it
-  still cut off at 65s. The cap is now a flat 20 minutes whose only job is surviving a
-  totally unreachable Liquidsoap.
-- **Icecast's title is useless for this.** It only changes when *we* push something new,
-  so waiting for it to change before pushing something new deadlocks. (It's still a fine
-  read-only ground truth for "what is genuinely on air right now" — the e2e test uses it
-  for exactly that.)
+- **`now_playing` is only ever written from an observation.** `_start_next()` hands a
+  track to Liquidsoap and deliberately touches nothing else; the next tick discovers it.
+  Every desync in this project's history came from writing that field optimistically.
+- **"Couldn't ask" is not "nothing is there".** The control channel raises
+  `LiquidsoapUnavailable` rather than returning an empty answer, and the sync loop holds
+  its last known state when it fires. Conflating the two made a dropped socket read as
+  "the track ended".
+- **Exactly one request in flight.** Before pushing, `_start_next` drops anything already
+  pending (`queue.remove`). Leftovers from a crashed process would otherwise play ahead of
+  whatever the app starts next.
+- **The countdown comes from Liquidsoap, never from `duration`.** Navidrome's duration is
+  used for the progress bar's *total* only; if it's wrong, the bar is wrong but playback
+  is still correct.
+- **Metadata parsing must tolerate CRLF.** Liquidsoap's telnet terminates lines with
+  `\r\n`; a regex anchored to `"$` silently matches nothing against the real server.
 
 ## Room state machine
 
-All state is in-memory in the app process, so a restart wipes the queue and rotation
-(the broadcast keeps playing — Liquidsoap and Icecast are untouched by an app restart).
+State lives in memory in the app process and is mirrored to disk after every mutation
+(see [Surviving a restart](#surviving-a-restart)), so a reload no longer costs anyone
+their queue. The broadcast is unaffected either way — Liquidsoap and Icecast don't care
+that the app restarted.
 
 ```mermaid
 stateDiagram-v2
@@ -184,6 +215,61 @@ flowchart LR
     C --> A
     style C stroke-dasharray: 5 5
 ```
+
+## Surviving a restart
+
+`uvicorn --reload` restarts the app on every source edit, and redeploys do the same. The
+audio never stops — but before persistence, the room did: queues, rotation and chat all
+vanished, and the app went blind to a track that was still playing.
+
+State is mirrored to a JSON file after every mutation, and rebuilt on startup.
+
+The saved state includes the **request id** we were last driving, which is what makes
+re-attaching exact rather than a guess.
+
+```mermaid
+flowchart TD
+    subgraph boot["Room.resume() — on startup"]
+        L["load room-state.json<br/>dj_order, dj_queues, chat,<br/>known names, current_rid"] --> Q{"request.metadata<br/>&lt;saved rid&gt; — still there?"}
+        Q -->|"yes — liquidsoap still holds it"| R["adopt it as current_rid;<br/>the next sync tick<br/>observes it normally"]
+        Q -->|"no — it played out while we were down"| S["clear it and<br/>start the next queued track"]
+    end
+    R --> B["_sync_once() → broadcast"]
+    S --> B
+```
+
+Re-attaching matters as much as the queues: Liquidsoap kept broadcasting throughout, so
+starting a fresh track on top of it would stack two songs. Note there is no arithmetic
+here and no heuristic threshold — we ask about one specific request and believe the
+answer, which is the same rule the sync loop follows.
+
+**Why a file and not Redis.** The payload is a few KB, there is exactly one writer, and
+nothing else reads it. Redis would add a container, a dependency and a failure mode — and
+would still need a volume to survive its own restarts, so it doesn't even remove the disk.
+A file stays inspectable with `cat` when something looks wrong.
+
+**What concurrent writes do.** Nothing surprising, by construction rather than by luck:
+
+- `_persist()` is a plain synchronous function with no `await` in it or in `save_state()`.
+  The app is single-threaded asyncio, so once a save starts, no other coroutine runs until
+  it finishes. Two "simultaneous" updates serialise into two complete sequential writes.
+- Each write dumps the whole room as it exists at that instant — it is a projection of
+  memory, not a read-modify-write — so last-write-wins is the correct outcome and there is
+  no merge to get wrong.
+- Writes go to a `mkstemp` file in the same directory and land via `os.replace`, an atomic
+  rename. A reader never sees a partial file, and a crash mid-write leaves the previous
+  file intact and loadable. A corrupt file is logged and ignored rather than taken as fatal.
+
+**The real hazard is two processes.** Two app instances pointed at the same `STATE_PATH`
+each hold an independent in-memory room and will clobber each other — every individual
+write stays intact, but the loser's queue silently disappears. This is plausible during
+development (`task dev` alongside a dockerized `app`), so the defaults keep them apart:
+the dev server resolves `STATE_PATH` relative to its working directory, while the
+container writes to its own volume. Point both at one path only if you mean to.
+
+One accepted gap: during a reload the outgoing process can write after the incoming one
+has already called `resume()`, so the very last mutation before a restart can be lost. It
+self-corrects on the next mutation.
 
 Play order for the above: `A1 → B1 → A2 → …`
 
@@ -222,17 +308,26 @@ Consequences worth knowing:
 
 ## Deployment topologies
 
+`docker-compose.yml` holds only Icecast + Liquidsoap. The app never runs in local Docker —
+it's either a host process (`task dev`) or, for the one place it *is* containerized, the
+remote deploy, which layers `docker-compose.deploy.yml` on top to add it.
+
 ```mermaid
 flowchart TB
-    subgraph prod["task up — everything in Docker"]
-        direction LR
-        pa["app:8080"] -.->|"liquidsoap:1234"| pl["liquidsoap"]
-        pl --> pi["icecast:8000"]
-    end
     subgraph dev["task dev — app on the host, hot reload"]
         direction LR
         da["uvicorn --reload<br/>on the host"] -.->|"127.0.0.1:1234"| dl["liquidsoap<br/>(container)"]
         dl --> di["icecast<br/>(container)"]
+    end
+    subgraph prod["task deploy — remote NAS"]
+        direction LR
+        Public(("friends'<br/>browsers")) -->|"HTTPS, path-routed<br/>(cloudflared - outside this repo)"| CF["Cloudflare Tunnel"]
+        CF -->|"/ → :APP_PORT"| pa["app:APP_PORT<br/>(published)"]
+        CF -->|"/radio.mp3 → :ICECAST_PORT"| pi["icecast:ICECAST_PORT<br/>(published)"]
+        LANuser(("browser on<br/>the LAN")) -->|"HTTP<br/>Host(APP_HOSTNAME_LOCAL)"| Traefik["Traefik<br/>(existing, network_mode: host)"]
+        Traefik -->|"docker-labels discovery"| pa
+        pa -.->|"liquidsoap:1234<br/>(no published port)"| pl["liquidsoap"]
+        pl --> pi
     end
 ```
 
@@ -242,6 +337,42 @@ the radio), which is why it is bound to loopback and never to `0.0.0.0`.
 
 Because the app holds room state in memory, `task dev`'s hot reload wipes the queue on
 every source edit. The audio keeps playing regardless.
+
+**Two independent paths reach `app` in deploy, on purpose.** A LAN-only one through
+Traefik (`web_local` entrypoint, plain HTTP, `APP_HOSTNAME_LOCAL`, no certresolver — the
+same pattern [the traefik role](https://github.com/tsdaemon/theseus/tree/main/roles/services/traefik)
+this was built against uses for internal-only dashboards like Portainer), and a public one
+where a Cloudflare Tunnel (`cloudflared`, configured entirely outside this repo) terminates
+TLS at Cloudflare's edge and forwards straight to `app`'s published port on the NAS,
+bypassing Traefik. `APP_PUBLIC_URL` is whatever hostname that Tunnel presents — independent
+of `APP_HOSTNAME_LOCAL`, which only has to resolve on the LAN.
+
+**Why `app` and `icecast` both publish a host port, but `liquidsoap` doesn't.** The
+Cloudflare Tunnel needs a real host port to forward to for each of `app` and `icecast` (it
+can't discover containers the way Traefik does), and a natural Tunnel config routes both
+under one public hostname by path — `/radio.mp3` to Icecast's port, everything else to the
+app's — so browsers see one origin for both the UI and the stream, matching how
+`ICECAST_STREAM_URL` already gets embedded straight into the page. `liquidsoap` never
+needs one: nothing outside the compose network ever talks to it directly, `app` reaches it
+by service name (`liquidsoap:1234`), same as Traefik reaching `app` by container IP rather
+than a published port.
+
+**Both ports are `${VAR:-default}` (`APP_PORT` defaulting to 6490, `ICECAST_PORT` to
+6491)**, not the Dockerfile/icecast.xml defaults of 8080/8000, purely so they read as
+distinct from other services' ports when eyeballing NAS-wide configs — nothing actually
+collides either way, since Docker namespaces each container's ports separately regardless
+of what's published. `ICECAST_PORT` also has to reach Liquidsoap (it connects to
+`icecast:$ICECAST_PORT` internally) and Icecast's own `<listen-socket>`, so changing it
+means setting the one env var, not editing three places by hand.
+
+**Why Icecast keeps a published port instead of also going through Traefik.** The audio
+stream is a long-lived connection and was already unauthenticated by design (the invite
+token gates the *room*, not the raw MP3 URL) — routing it through a reverse proxy wouldn't
+add real access control, just another hop.
+
+**The Homepage dashboard widget** (`homepage.widget.*` labels on `app`) polls
+`GET /api/stats` over the LAN-local Traefik route — deliberately unauthenticated, since a
+listener count isn't sensitive, and Homepage itself lives on the LAN anyway.
 
 ## Configuration
 
@@ -255,7 +386,20 @@ All via `.env` (see `.env.example`):
 | `ICECAST_SOURCE_PASSWORD` | icecast + liquidsoap | Must match on both sides or the mount never connects |
 | `ICECAST_ADMIN_PASSWORD` / `_RELAY_PASSWORD` / `_HOSTNAME` | icecast | |
 | `LIQUIDSOAP_HOST` / `_PORT` | app | `liquidsoap:1234` in Docker; `localhost:1234` for `task dev` |
-| `APP_PUBLIC_URL` | `task invite` | Only so the invite link prints in full |
+| `APP_PUBLIC_URL` | `task invite` / `task deploy:invite` | Only so the invite link prints in full - the *public*-facing URL, whatever fronts it |
+| `APP_HOSTNAME` | `task deploy` only | LAN-local hostname Traefik routes to the app over plain HTTP; lives in `.env.deploy`, not `.env` |
+| `DEPLOY_INVITE_TOKEN` | `task deploy` only | The deployed room's invite secret - a separate key from `INVITE_TOKEN` on purpose, see below |
+
+`task deploy` reads `.env.deploy` instead of `.env` (see `.env.deploy.example`) — kept
+separate so a local test setup and the real NAS's credentials/hostname never have to share
+one file. `go-task` merges dotenv files rather than replacing, so `.env.deploy` only needs
+to hold what's actually different from `.env`.
+
+`DEPLOY_INVITE_TOKEN` is deliberately a different key than `.env`'s `INVITE_TOKEN` (mapped
+onto the container's `INVITE_TOKEN` env var in `docker-compose.deploy.yml`), rather than
+letting the deploy fall back to `.env`'s value when unset. Otherwise your local test room
+and the real deployment would silently share one invite link - anyone you handed the dev
+link to could join the real room, and rotating one would rotate both.
 
 ## Layout
 
@@ -272,6 +416,8 @@ app/                      uv project (src layout)
   tests/e2e/              needs a running stack
 icecast/                  Dockerfile + config template
 liquidsoap/               Dockerfile + radio.liq
+docker-compose.yml        icecast + liquidsoap — used by task dev, and as the base for deploy
+docker-compose.deploy.yml overlay: adds app + Traefik/Homepage labels — used by task deploy
 docs/architecture.md      this file
 ```
 

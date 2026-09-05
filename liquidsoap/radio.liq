@@ -8,10 +8,17 @@ queue = request.queue(id="queue")
 silence = blank(duration=5.)
 radio = fallback(track_sensitive=false, [queue, silence])
 
+# Every listener costs this much upload, so it's tunable: 320 sounds close enough to
+# the source for a small private room, but drop it if the connection struggles.
+bitrate = int_of_string(environment.get(default="320", "STREAM_BITRATE"))
+log.important("Streaming at #{bitrate} kbps")
+
+icecast_port = int_of_string(environment.get(default="6491", "ICECAST_PORT"))
+
 output.icecast(
-  %mp3(bitrate=192),
+  %mp3(bitrate=bitrate),
   host="icecast",
-  port=8000,
+  port=icecast_port,
   password=environment.get("ICECAST_SOURCE_PASSWORD"),
   mount="radio.mp3",
   name="tsdfm",

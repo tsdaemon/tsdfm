@@ -19,6 +19,8 @@ tasks:
     desc: Print the universal invite link (generates INVITE_TOKEN in .env on first run)
     deps: [sync]
     dir: "{{.APP_DIR}}"
+    env:
+      TSDFM_RESTART_HINT: "restart 'task dev'"
     cmds:
       - uv run tsdfm-invite
 
@@ -67,28 +69,8 @@ tasks:
     cmds:
       - PYTHONPATH= uv run pytest -q
 
-  up:
-    desc: Run the full stack in Docker (icecast + liquidsoap + app)
-    cmds:
-      - docker compose up -d --build
-
-  down:
-    desc: Stop the full Docker stack
-    cmds:
-      - docker compose down
-
-  restart:
-    desc: Rebuild and restart just the app container
-    cmds:
-      - docker compose up -d --build app
-
-  logs:
-    desc: Tail all docker compose logs
-    cmds:
-      - docker compose logs -f
-
   build:
-    desc: Rebuild all docker images
+    desc: Rebuild the Icecast/Liquidsoap docker images
     cmds:
       - docker compose build
 
@@ -97,3 +79,33 @@ tasks:
     cmds:
       - docker compose down
       - rm -rf {{.APP_DIR}}/.venv
+
+  deploy:
+    desc: Build and (re)start the full stack on the remote NAS, behind Traefik
+    dotenv: ['.env.deploy']
+    cmds:
+      - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml up -d --build
+
+  deploy:down:
+    desc: Stop the full stack on the remote NAS
+    dotenv: ['.env.deploy']
+    cmds:
+      - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml down
+
+  deploy:logs:
+    desc: Tail logs from the remote NAS deployment
+    dotenv: ['.env.deploy']
+    cmds:
+      - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml logs -f
+
+  deploy:invite:
+    desc: Print the deployed room's invite link (generates DEPLOY_INVITE_TOKEN in .env.deploy on first run)
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    dotenv: ['../.env.deploy']
+    env:
+      TSDFM_ENV_PATH: "{{.ROOT_DIR}}/.env.deploy"
+      TSDFM_INVITE_TOKEN_VAR: DEPLOY_INVITE_TOKEN
+      TSDFM_RESTART_HINT: "run 'task deploy'"
+    cmds:
+      - uv run tsdfm-invite

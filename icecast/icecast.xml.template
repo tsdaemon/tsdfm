@@ -23,7 +23,7 @@
     <hostname>${ICECAST_HOSTNAME}</hostname>
 
     <listen-socket>
-        <port>8000</port>
+        <port>${ICECAST_PORT}</port>
     </listen-socket>
 
     <fileserve>1</fileserve>

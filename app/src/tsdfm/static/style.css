@@ -100,6 +100,35 @@ button:active:not(:disabled) { transform: scale(0.96); }
    that so the golden-ratio split actually holds regardless of content */
 #app > div { min-width: 0; }
 
+.player-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
+  align-items: stretch;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.player-row > .panel {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.branding {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.brand-logo {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -138,6 +167,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 .enter { animation: enter 0.25s ease-out; }
 
 .np-main { display: flex; align-items: center; gap: 12px; }
+.np-info { min-width: 0; overflow-wrap: anywhere; }
 
 .art {
   border-radius: 6px;
@@ -175,7 +205,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
   justify-content: center;
 }
 
-#volume-slider { flex: 1; accent-color: var(--accent); }
+#volume-slider { flex: 1; min-width: 0; accent-color: var(--accent); }
 
 #dj-list { list-style: none; margin: 0; padding: 0; }
 #dj-list li.dj-entry { padding: 8px 0; border-bottom: 1px solid var(--border); }
