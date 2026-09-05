@@ -168,12 +168,8 @@ function renderNowPlaying(np) {
   }
   title.textContent = np.title;
   meta.textContent = `${np.artist} — spun by ${np.dj_name}`;
-  if (np.art_url) {
-    art.src = np.art_url;
-    art.style.display = "block";
-  } else {
-    art.style.display = "none";
-  }
+  art.style.display = "block";
+  setArt(art, np.art_url);
   updatePosition();
 }
 
@@ -382,13 +378,11 @@ async function runSearch() {
   }
   for (const track of results) {
     const li = document.createElement("li");
-    if (track.art_url) {
-      const img = document.createElement("img");
-      img.className = "art art-sm";
-      img.alt = "";
-      img.src = track.art_url;
-      li.appendChild(img);
-    }
+    const img = document.createElement("img");
+    img.className = "art art-sm";
+    img.alt = "";
+    setArt(img, track.art_url);
+    li.appendChild(img);
     const label = document.createElement("span");
     label.textContent = `${track.artist} – ${track.title}`;
     li.appendChild(label);

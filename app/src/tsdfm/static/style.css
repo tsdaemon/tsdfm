@@ -70,10 +70,17 @@ button svg { flex-shrink: 0; }
   margin: 0 auto;
   padding: 20px;
   gap: 16px;
-  grid-template-columns: 2fr 1fr;
+  /* golden ratio, so the wide (player/queue) column is to the narrow (chat/dj/logs)
+     column as the whole is to the wide column */
+  grid-template-columns: 1.618fr 1fr;
 }
 
 #app.visible { display: grid; }
+
+/* grid children default to min-width:auto, which lets long unbroken content
+   (e.g. a log line) force the track wider than its fr share - this overrides
+   that so the golden-ratio split actually holds regardless of content */
+#app > div { min-width: 0; }
 
 .panel {
   background: var(--panel);
@@ -153,7 +160,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
   font-family: ui-monospace, monospace;
   font-size: 12px;
 }
-#log-panel li { padding: 3px 0; border-bottom: 1px solid var(--border); color: var(--muted); }
+#log-panel li { padding: 3px 0; border-bottom: 1px solid var(--border); color: var(--muted); overflow-wrap: anywhere; }
 #log-panel li.level-ERROR { color: #f87171; }
 #log-panel li.level-WARNING { color: #fbbf24; }
 #log-panel li .log-time { opacity: 0.6; margin-right: 6px; }
