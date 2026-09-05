@@ -23,6 +23,7 @@ const ICONS = {
   volumeOff: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12,4L9.91,6.09L12,8.18M4.27,3L3,4.27L7.73,9H3V15H7L12,20V13.27L16.25,17.53C15.58,18.04 14.83,18.46 14,18.7V20.77C15.38,20.45 16.63,19.82 17.68,18.96L19.73,21L21,19.73L12,10.73M19,12C19,12.94 18.8,13.82 18.46,14.64L19.97,16.15C20.62,14.91 21,13.5 21,12C21,7.72 18,4.14 14,3.23V5.29C16.89,6.15 19,8.83 19,12M16.5,12C16.5,10.23 15.5,8.71 14,7.97V10.18L16.45,12.63C16.5,12.43 16.5,12.21 16.5,12Z" /></svg>',
   volumeHigh: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14,3.23V5.29C16.89,6.15 19,8.83 19,12C19,15.17 16.89,17.84 14,18.7V20.77C18,19.86 21,16.28 21,12C21,7.72 18,4.14 14,3.23M16.5,12C16.5,10.23 15.5,8.71 14,7.97V16C15.5,15.29 16.5,13.76 16.5,12M3,9V15H7L12,20V4L7,9H3Z" /></svg>',
   close: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" /></svg>',
+  plus: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" /></svg>',
 };
 
 const AVATAR_EMOJI = [
@@ -59,11 +60,28 @@ function trackRow(track) {
   const img = document.createElement("img");
   img.className = "art art-sm";
   img.alt = "";
+  img.draggable = false;   // don't let the thumbnail hijack a row drag
   setArt(img, track.art_url);
   li.appendChild(img);
   const label = document.createElement("span");
   label.textContent = `${track.artist} – ${track.title}`;
   li.appendChild(label);
+  const plays = track.plays || 0, likes = track.likes || 0, favs = track.favorites || 0;
+  if (plays > 0 || likes > 0 || favs > 0) {
+    const stats = document.createElement("span");
+    stats.className = "track-stats";
+    stats.textContent = [
+      plays > 0 && `▶ ${plays}`,
+      likes > 0 && `♥ ${likes}`,
+      favs > 0 && `★ ${favs}`,
+    ].filter(Boolean).join(" · ");
+    stats.title = [
+      `Played ${plays}× in the room`,
+      likes > 0 && `${likes} like${likes === 1 ? "" : "s"}`,
+      favs > 0 && `favourited ${favs}×`,
+    ].filter(Boolean).join(" · ");
+    li.appendChild(stats);
+  }
   return li;
 }
 
@@ -115,9 +133,16 @@ const state = {
   djs: [],
   listeners: [],
   chat: [],
+  history: [],           // recently played, oldest first (as sent by the server)
   logs: [],
   votes: { skip: 0, skipNeeded: 1, like: 0 },
+  favorited: false,      // current track starred in Navidrome
+  view: "room",
+  libraryDraft: "",
+  library: { kind: "alphabeticalByName", query: "", offset: 0, albums: [], album: null, songs: [], artists: [], artist: null, stats: null, loading: false, loaded: false, error: "" },
   search: { status: "", error: "", results: [] },
+  toast: null,          // { text } - transient confirmation, cleared on a timer
+  justQueued: null,     // { id } - row to flash after a queue action; cleared on a timer
 };
 
 function setState(patch) {
@@ -146,20 +171,25 @@ function myQueue() {
 // Private to the render layer: lets list renderers animate only genuinely new rows
 // instead of replaying every entrance on unrelated state changes. Never read by
 // anything outside render().
-const memo = { djQueueLengths: {}, myQueueLength: 0, chatCount: 0, logCount: 0 };
+const memo = { djQueueLengths: {}, myQueueLength: 0, libQueueLength: 0, chatCount: 0, logCount: 0 };
 
 function render() {
   renderOverlay();
   if (state.phase !== "live") return;
   renderProfile();
   renderNowPlaying();
+  renderNavStrip();
   renderDjBooth();
   renderMyQueue();
   renderListeners();
+  renderHistory();
   renderChat();
   renderLogs();
   renderSearch();
   renderVotes();
+  renderLibrary();
+  renderLibraryQueue();
+  renderToast();
   syncAudio();
 }
 
@@ -274,6 +304,21 @@ function renderNowPlaying() {
   fill.style.width = `${Math.min(100, (elapsed / duration) * 100)}%`;
 }
 
+// The Library view drops the full On Air panel, so what's playing collapses to a
+// one-liner in the nav bar. It doubles as a shortcut back to the Radio room.
+function renderNavStrip() {
+  const strip = $("nav-now-playing");
+  const np = state.nowPlaying;
+  const show = state.view === "library" && Boolean(np);
+  strip.hidden = !show;
+  if (!show) return;
+  setArt($("nav-np-art"), np.art_url);
+  $("nav-np-text").textContent = np.on_air
+    ? `${np.title} — ${np.artist}`
+    : `${np.title} — cueing up…`;
+  $("nav-live-dot").hidden = !np.on_air;
+}
+
 function renderDjBooth() {
   const list = $("dj-list");
   list.innerHTML = "";
@@ -317,34 +362,111 @@ function renderDjBooth() {
   $("queue-panel").style.display = isDj() ? "block" : "none";
 }
 
-function renderMyQueue() {
-  if (!isDj()) return;
-  const list = $("my-queue-list");
+// Both queue views (the Radio room's "Up next", the Library's right rail) draw
+// the same list from the same state - this keeps them from drifting. memoKey
+// names this view's own row-count baseline so entrance animations fire only on
+// genuinely new rows, independently per view.
+function renderQueueInto(list, memoKey, emptyText) {
   const queue = myQueue();
   list.innerHTML = "";
-
   if (queue.length === 0) {
-    list.innerHTML = '<li class="meta">Nothing queued yet - search above and click a track to add it.</li>';
-    memo.myQueueLength = 0;
+    list.innerHTML = `<li class="meta">${emptyText}</li>`;
+    memo[memoKey] = 0;
     return;
   }
   queue.forEach((track, index) => {
     const li = trackRow(track);
-    if (index >= memo.myQueueLength) li.classList.add("enter");
+    li.classList.add("queue-row");
+    if (index >= memo[memoKey]) li.classList.add("enter");
+
+    // Drag the whole row to reorder. Drop lands the track where the target row is.
+    li.draggable = true;
+    li.addEventListener("dragstart", (e) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(index));
+      li.classList.add("dragging");
+    });
+    li.addEventListener("dragend", () => li.classList.remove("dragging"));
+    li.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      li.classList.add("drop-target");
+    });
+    li.addEventListener("dragleave", () => li.classList.remove("drop-target"));
+    li.addEventListener("drop", (e) => {
+      e.preventDefault();
+      li.classList.remove("drop-target");
+      const from = Number(e.dataTransfer.getData("text/plain"));
+      if (Number.isInteger(from) && from !== index) send({ type: "move_track", from, to: index });
+    });
+
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "icon-btn";
     removeBtn.innerHTML = ICONS.close;
+    removeBtn.setAttribute("aria-label", `Remove ${track.title}`);
     removeBtn.addEventListener("click", () => send({ type: "remove_track", index }));
     li.appendChild(removeBtn);
     list.appendChild(li);
   });
-  memo.myQueueLength = queue.length;
+  memo[memoKey] = queue.length;
+}
+
+function renderMyQueue() {
+  if (!isDj()) return;
+  renderQueueInto($("my-queue-list"), "myQueueLength",
+    "Nothing queued yet - search above and click a track to add it.");
+}
+
+function renderLibraryQueue() {
+  const list = $("library-queue-list");
+  if (!isDj()) {
+    list.innerHTML = '<li class="meta">Step up to DJ in the Radio room to start a queue.</li>';
+    memo.libQueueLength = 0;
+    return;
+  }
+  renderQueueInto(list, "libQueueLength", "Nothing queued yet - click a track to add it.");
 }
 
 function renderListeners() {
   $("listeners").textContent =
     state.listeners.map((u) => `${u.avatar} ${u.name}`).join(", ") || "Just you.";
+}
+
+// Everything that's been on air, newest first. A DJ can click any row to drop it
+// back on their own queue (same click-to-queue contract as the library).
+function renderHistory() {
+  const list = $("history-list");
+  list.innerHTML = "";
+  if (state.history.length === 0) {
+    list.innerHTML = '<li class="meta">Nothing has played yet.</li>';
+    return;
+  }
+  const dj = isDj();
+  for (let i = state.history.length - 1; i >= 0; i--) {
+    const h = state.history[i];
+    const track = {
+      id: h.navidrome_id, title: h.title, artist: h.artist,
+      duration: h.duration, art_url: h.art_url,
+    };
+    const li = trackRow(track);
+    li.classList.add("history-row");
+    if (state.justQueued?.id === h.navidrome_id) li.classList.add("flash");
+    if (dj) {
+      li.classList.add("queueable");
+      li.setAttribute("role", "button");
+      li.title = "Add to your queue";
+      li.setAttribute("aria-label", `Queue ${h.title} again`);
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "icon-btn";
+      add.tabIndex = -1;
+      add.innerHTML = ICONS.plus;
+      li.appendChild(add);
+    }
+    li.addEventListener("click", () => queueTrack(track, li));
+    list.appendChild(li);
+  }
 }
 
 // Chat and logs only ever grow, so they append rather than rebuild - rebuilding
@@ -390,19 +512,277 @@ function renderSearch() {
   list.innerHTML = "";
   for (const track of state.search.results) {
     const li = trackRow(track);
+    if (state.justQueued?.id === track.id) li.classList.add("flash");
+    const duration = document.createElement("span");
+    duration.className = "track-duration";
+    duration.textContent = Number.isFinite(track.duration) && track.duration > 0
+      ? formatTime(track.duration) : "—";
+    duration.title = "Track duration";
+    li.appendChild(duration);
     li.style.cursor = "pointer";
-    li.addEventListener("click", () => {
-      send({ type: "queue_track", ...track });
-      setState({ search: { ...state.search, status: `Added "${track.title}" to your queue.` } });
-    });
+    li.addEventListener("click", () => queueTrack(track, li));
     list.appendChild(li);
   }
+}
+
+const LIBRARY_VIEWS = [
+  ["alphabeticalByName", "All albums"], ["alphabeticalByArtist", "By artist"],
+  ["songs", "Songs"],
+  ["random", "Random"], ["starred", "Favourites"], ["highest", "Top rated"],
+  ["newest", "Recently added"], ["recent", "Recently played"], ["frequent", "Most played"],
+];
+
+// A library track row: title + art (via trackRow) plus a duration and a
+// queue affordance. Shared by album detail and the flat Songs list.
+function libraryTrackRow(track) {
+  const row = trackRow(track);
+  if (state.justQueued?.id === track.id) row.classList.add("flash");
+  const duration = document.createElement("span");
+  duration.className = "track-duration";
+  duration.textContent = track.duration > 0 ? formatTime(track.duration) : "—";
+  const hint = document.createElement("span");
+  hint.className = "track-add-hint";
+  const queued = myQueue().some(t => t.id === track.id);
+  if (isDj()) {
+    row.classList.add("queueable");
+    hint.textContent = queued ? "✓ In queue" : "+ Queue";
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-label", `Queue ${track.title}`);
+  } else {
+    hint.textContent = queued ? "✓ In queue" : "";
+  }
+  // Wired either way: queueTrack refuses a non-DJ visibly instead of the click
+  // landing on nothing at all.
+  row.addEventListener("click", () => queueTrack(track, row));
+  row.append(duration, hint);
+  return row;
+}
+
+function renderLibrary() {
+  const lib = state.library;
+  const browsing = state.view === "library";
+  $("app").classList.toggle("library-view", browsing);
+  $("library-panel").hidden = !browsing;
+  $("room-tab").setAttribute("aria-pressed", String(!browsing));
+  $("library-tab").setAttribute("aria-pressed", String(browsing));
+  $("library-query").value = state.libraryDraft;
+  // Keep album nodes stable during playback ticks, including keyboard focus.
+  const key = JSON.stringify([lib, isDj(), myQueue().map(t => t.id), state.justQueued?.id]);
+  if (memo.library === key) return;
+  memo.library = key;
+  const mode = lib.album ? "albumDetail"
+    : lib.kind === "songs" ? "songList"
+    : (lib.kind === "alphabeticalByArtist" && !lib.query && !lib.artist) ? "artistList"
+    : "albumGrid";
+  // Only the plain album grid and the flat song list paginate - not an artist's
+  // discography, not search results.
+  const paged = (mode === "albumGrid" && !lib.artist) || mode === "songList";
+
+  $("library-query").placeholder = mode === "songList" ? "Search songs…" : "Search albums…";
+
+  $("library-filters").replaceChildren(...LIBRARY_VIEWS.map(([kind, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(lib.kind === kind && !lib.query));
+    button.addEventListener("click", () =>
+      kind === "alphabeticalByArtist" ? showArtists()
+        : kind === "songs" ? loadSongs({ query: "", offset: 0 })
+        : loadAlbums({ kind, query: "", offset: 0 }));
+    return button;
+  }));
+
+  let status = "";
+  if (lib.loading) status = "Loading…";
+  else if (mode === "albumDetail")
+    status = isDj() ? "Choose songs to add to your queue." : "Step up in the Radio room to queue songs.";
+  else if (mode === "songList")
+    status = !lib.songs.length ? (lib.loaded ? "No songs found." : "")
+      : lib.query ? `${lib.songs.length} song${lib.songs.length === 1 ? "" : "s"} matching “${lib.query}”`
+      : `Songs ${lib.offset + 1}–${lib.offset + lib.songs.length}`;
+  else if (mode === "artistList")
+    status = lib.artists.length
+      ? `${lib.artists.length} artists · ${lib.stats ? lib.stats.albumCount : "…"} albums`
+      : lib.loaded ? "No artists found." : "";
+  else if (lib.artist)
+    status = `${lib.artist.name || "Artist"} · ${lib.albums.length} ${lib.albums.length === 1 ? "album" : "albums"}`;
+  else if (!lib.loaded) status = "";
+  else if (!lib.albums.length) status = "No albums found.";
+  else if (lib.query)
+    status = `${lib.albums.length} album${lib.albums.length === 1 ? "" : "s"} matching “${lib.query}”`;
+  else
+    status = `Albums ${lib.offset + 1}–${lib.offset + lib.albums.length}${lib.stats ? ` of ${lib.stats.albumCount}` : ""}`;
+  $("library-status").textContent = status;
+  $("library-error").textContent = lib.error;
+
+  $("library-back").hidden = !(lib.album || lib.artist);
+  $("library-back").textContent = lib.album ? "← Back to albums" : "← All artists";
+  $("album-grid").hidden = mode !== "albumGrid";
+  $("artist-list").hidden = mode !== "artistList";
+  $("song-list").hidden = mode !== "songList";
+  $("library-prev").disabled = !paged || lib.loading || lib.offset === 0 || lib.kind === "random" && !lib.query;
+  $("library-next").disabled = !paged || lib.loading || lib.kind === "random" && !lib.query
+    || (mode === "songList" ? lib.songs.length < 48
+        : lib.stats && !lib.query ? lib.offset + 48 >= lib.stats.albumCount : lib.albums.length < 48);
+  $("library-refresh").disabled = lib.loading;
+  $("library-page").textContent = paged && !lib.query ? `Page ${lib.offset / 48 + 1}` : "";
+
+  $("artist-list").replaceChildren(...lib.artists.map(a => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "artist-row";
+    const name = document.createElement("span");
+    name.className = "artist-name";
+    name.textContent = a.name;
+    const count = document.createElement("span");
+    count.className = "artist-count";
+    count.textContent = `${a.album_count} ${a.album_count === 1 ? "album" : "albums"}`;
+    button.append(name, count);
+    button.addEventListener("click", () => loadArtist(a.id, a.name));
+    return button;
+  }));
+
+  $("album-grid").replaceChildren(...lib.albums.map(album => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "album-card";
+    button.title = `${album.name} — ${album.artist}`;
+    const img = document.createElement("img");
+    img.alt = "";
+    img.loading = "lazy";
+    setArt(img, album.art_url);
+    const title = document.createElement("strong");
+    title.textContent = album.name;
+    const artist = document.createElement("span");
+    artist.textContent = album.artist;
+    const meta = document.createElement("small");
+    meta.textContent = [album.year, `${album.song_count} tracks`].filter(Boolean).join(" · ");
+    button.append(img, title, artist, meta);
+    button.addEventListener("click", () => loadAlbum(album.id));
+    return button;
+  }));
+  $("song-list").replaceChildren(...lib.songs.map(libraryTrackRow));
+
+  const detail = $("album-detail");
+  detail.replaceChildren();
+  if (!lib.album) return;
+  const album = lib.album;
+  const header = document.createElement("div");
+  header.className = "album-header";
+  const art = document.createElement("img");
+  art.alt = "";
+  setArt(art, album.art_url);
+  const info = document.createElement("div");
+  const title = document.createElement("h2");
+  title.textContent = album.name;
+  const meta = document.createElement("p");
+  meta.textContent = [album.artist, album.year, `${album.tracks.length} tracks`, album.duration > 0 ? formatTime(album.duration) : ""].filter(Boolean).join(" · ");
+  info.append(title, meta);
+  header.append(art, info);
+  const tracks = document.createElement("ol");
+  tracks.className = "album-tracks";
+  for (const track of album.tracks) tracks.appendChild(libraryTrackRow(track));
+  detail.append(header, tracks);
+}
+
+// A request token prevents a slow response from replacing a newer selection.
+let libraryRequest = 0;
+async function libraryFetch(url, patch, merge) {
+  const request = ++libraryRequest;
+  setState({ library: { ...state.library, ...patch, loading: true, error: "" } });
+  try {
+    const response = await fetch(url);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Library unavailable. Please try again.");
+    if (request !== libraryRequest) return;
+    setState({ library: { ...state.library, loading: false, loaded: true, ...merge(body) } });
+  } catch (error) {
+    if (request !== libraryRequest) return;
+    setState({ library: { ...state.library, loading: false, error: error.message } });
+  }
+}
+
+function loadAlbums(patch = {}) {
+  const lib = { ...state.library, ...patch };
+  if (patch.query !== undefined) setState({ libraryDraft: patch.query });
+  return libraryFetch(`/api/albums?${new URLSearchParams({ kind: lib.kind, q: lib.query, offset: lib.offset })}`,
+    { ...patch, album: null, artist: null, albums: [] }, body => ({ albums: body }));
+}
+
+function loadSongs(patch = {}) {
+  const lib = { ...state.library, kind: "songs", ...patch };
+  if (patch.query !== undefined) setState({ libraryDraft: patch.query });
+  return libraryFetch(`/api/songs?${new URLSearchParams({ q: lib.query, offset: lib.offset })}`,
+    { ...patch, kind: "songs", album: null, artist: null, songs: [] }, body => ({ songs: body }));
+}
+
+function loadAlbum(id) {
+  return libraryFetch(`/api/album?${new URLSearchParams({ id })}`, {}, body => ({ album: body }));
+}
+
+function loadArtist(id, name = "") {
+  return libraryFetch(`/api/artist?${new URLSearchParams({ id })}`,
+    { artist: { id, name }, album: null, albums: [] },
+    body => ({ artist: { id: body.id, name: body.name }, albums: body.albums }));
+}
+
+// The artist index is also the only cheap source of library-wide totals, so it's
+// fetched on entry (interactive=false, totals only) and again when "By artist" is
+// opened without a cached copy (interactive=true, drives the loading state).
+async function fetchArtists(interactive) {
+  const request = interactive ? ++libraryRequest : libraryRequest;
+  try {
+    const response = await fetch("/api/artists");
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Library unavailable. Please try again.");
+    if (interactive && request !== libraryRequest) return;
+    setState({ library: { ...state.library, loaded: true, artists: body.artists,
+      stats: { albumCount: body.album_count, artistCount: body.artist_count },
+      ...(interactive ? { loading: false } : {}) } });
+  } catch (error) {
+    if (interactive && request === libraryRequest)
+      setState({ library: { ...state.library, loading: false, error: error.message } });
+  }
+}
+
+function showArtists() {
+  const cached = state.library.artists.length > 0;
+  ++libraryRequest;
+  setState({
+    libraryDraft: "",
+    library: { ...state.library, kind: "alphabeticalByArtist", query: "", offset: 0,
+      artist: null, album: null, albums: [], loading: !cached, error: "" },
+  });
+  if (!cached) fetchArtists(true);
 }
 
 function renderVotes() {
   $("skip-count").textContent = state.votes.skip;
   $("skip-needed").textContent = state.votes.skipNeeded;
   $("like-count").textContent = state.votes.like;
+  const fav = $("fav-btn");
+  fav.classList.toggle("active", state.favorited);
+  fav.setAttribute("aria-pressed", state.favorited ? "true" : "false");
+}
+
+// Fire-and-forget actions (queueing a track) get no echo of their own from the
+// server, so this is their acknowledgement. The dismiss timer lives outside
+// render() - render only mirrors whether state.toast is currently set, and keeps
+// the last text through the fade-out so it doesn't blank mid-transition.
+let toastTimer = null;
+function renderToast() {
+  const el = $("toast");
+  if (state.toast) {
+    el.textContent = state.toast.text;
+    // Kept through the fade-out, like the text, so it can't flip colour mid-transition.
+    el.classList.toggle("deny", state.toast.kind === "deny");
+  }
+  el.classList.toggle("show", Boolean(state.toast));
+}
+function showToast(text, kind = "ok") {
+  setState({ toast: { text, kind } });
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => setState({ toast: null }), 2400);
 }
 
 // The countdown is the only thing that changes without a server message.
@@ -439,11 +819,13 @@ async function connect() {
         djs: msg.dj_order,
         listeners: msg.users,
         chat: msg.chat_history,
+        history: msg.play_history || [],
         votes: {
           skip: msg.skip_votes,
           skipNeeded: msg.skip_votes_needed,
           like: msg.like_votes,
         },
+        favorited: !!msg.favorited,
       });
     } else if (msg.type === "progress") {
       // Countdown only - carries no track identity, so patch rather than replace.
@@ -501,6 +883,52 @@ function sendChat() {
   input.value = "";
 }
 
+// Queueing is DJ-only. Refuse a non-DJ click visibly here rather than letting it
+// reach a server that silently drops it - that read as a successful add.
+function denyQueue(rowEl) {
+  showToast("Only DJs can queue - step up in the DJ booth", "deny");
+  if (!rowEl) return;
+  rowEl.classList.remove("deny");
+  void rowEl.offsetWidth;  // restart the animation when the same row is clicked again
+  rowEl.classList.add("deny");
+  setTimeout(() => rowEl.classList.remove("deny"), 600);
+}
+
+let justQueuedTimer = null;
+function queueTrack(track, rowEl) {
+  if (!isDj()) return denyQueue(rowEl);
+  send({ type: "queue_track", ...track });
+  showToast(`Added “${track.title}” to your queue`);
+  if (rowEl) flyFromRow(rowEl, track);
+  // State-driven so the flash survives the list rebuild the server response
+  // triggers; the fly-up above is a detached node and needs no such help.
+  setState({ justQueued: { id: track.id } });
+  clearTimeout(justQueuedTimer);
+  justQueuedTimer = setTimeout(() => setState({ justQueued: null }), 600);
+}
+
+// Presentational flourish, side-effect only - driven by an action, never by
+// render(). Reads nothing, writes nothing back to state (same rationale as the
+// audio module): a label detached onto <body> that flies up from the clicked
+// row so the click has a visible origin and direction.
+function flyFromRow(rowEl, track) {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const rect = rowEl.getBoundingClientRect();
+  const fly = document.createElement("div");
+  fly.className = "queue-fly";
+  fly.textContent = `＋ ${track.title}`;
+  fly.style.left = `${rect.left + 44}px`;
+  fly.style.top = `${rect.top + 8}px`;
+  fly.style.maxWidth = `${Math.max(80, rect.width - 140)}px`;
+  document.body.appendChild(fly);
+  requestAnimationFrame(() => {
+    // Up and slightly toward the queue rail on the right.
+    fly.style.transform = "translate(24px, -56px)";
+    fly.style.opacity = "0";
+  });
+  setTimeout(() => fly.remove(), 650);
+}
+
 async function runSearch() {
   const q = $("search-input").value.trim();
   if (!q) return;
@@ -549,15 +977,25 @@ const volumeSlider = $("volume-slider");
 const LIVE_LAG_TOLERANCE = 5;
 let lastSyncedTrackId = null;
 
+function audioIsAudible() {
+  // "Sound is reaching the listener" - all three have to be true. A blocked
+  // autoplay leaves the element paused with muted still false, so checking
+  // `muted` alone would show "on" while nothing is playing.
+  return !radioAudio.paused && !radioAudio.muted && radioAudio.volume > 0;
+}
+
 function syncMuteIcon() {
-  const silent = radioAudio.muted || radioAudio.volume === 0;
-  muteBtn.innerHTML = silent ? ICONS.volumeOff : ICONS.volumeHigh;
-  muteBtn.setAttribute("aria-label", silent ? "Unmute" : "Mute");
+  const audible = audioIsAudible();
+  muteBtn.innerHTML = audible ? ICONS.volumeHigh : ICONS.volumeOff;
+  muteBtn.setAttribute("aria-label", audible ? "Mute" : "Unmute");
 }
 
 // The icon follows the element's own events rather than our assumptions, so it can
-// never show "on" while the browser has actually left the stream muted.
-radioAudio.addEventListener("volumechange", syncMuteIcon);
+// never show "on" while the browser has actually left the stream silent - whether
+// that is an explicit mute, zero volume, or a play() the browser refused.
+for (const event of ["volumechange", "play", "playing", "pause", "waiting", "stalled"]) {
+  radioAudio.addEventListener(event, syncMuteIcon);
+}
 syncMuteIcon();
 
 function ensurePlaying() {
@@ -622,7 +1060,18 @@ async function startPlayback() {
 // ---------------------------------------------------------------------- wiring
 
 muteBtn.addEventListener("click", () => {
-  radioAudio.muted = !radioAudio.muted;
+  if (audioIsAudible()) {
+    radioAudio.muted = true;
+    return;
+  }
+  // Whatever silent state we are in - muted, zeroed volume, or a paused stream
+  // the browser blocked - one click of a real user gesture puts sound back. The
+  // gesture makes an audible play() allowed, so this never needs a second click.
+  radioAudio.muted = false;
+  if (radioAudio.volume === 0) {
+    radioAudio.volume = 1;
+    volumeSlider.value = "1";
+  }
   ensurePlaying();
 });
 
@@ -633,9 +1082,44 @@ volumeSlider.addEventListener("input", () => {
   ensurePlaying();
 });
 
+$("room-tab").addEventListener("click", () => setState({ view: "room" }));
+$("nav-now-playing").addEventListener("click", () => setState({ view: "room" }));
+$("library-tab").addEventListener("click", () => {
+  setState({ view: "library" });
+  if (!state.library.loaded && !state.library.loading) loadAlbums();
+  if (!state.library.stats) fetchArtists(false);
+});
+$("library-query").addEventListener("input", event => setState({ libraryDraft: event.target.value }));
+$("library-search").addEventListener("submit", event => {
+  event.preventDefault();
+  const patch = { query: $("library-query").value.trim(), offset: 0 };
+  (state.library.kind === "songs" ? loadSongs : loadAlbums)(patch);
+});
+const libraryPager = () => state.library.kind === "songs" ? loadSongs : loadAlbums;
+$("library-prev").addEventListener("click", () => libraryPager()({ offset: Math.max(0, state.library.offset - 48) }));
+$("library-next").addEventListener("click", () => libraryPager()({ offset: state.library.offset + 48 }));
+$("library-refresh").addEventListener("click", () => {
+  const lib = state.library;
+  if (lib.album) loadAlbum(lib.album.id);
+  else if (lib.artist) loadArtist(lib.artist.id, lib.artist.name);
+  else if (lib.kind === "songs") loadSongs();
+  else if (lib.kind === "alphabeticalByArtist" && !lib.query) {
+    setState({ library: { ...lib, loading: true, error: "" } });
+    fetchArtists(true);
+  } else loadAlbums();
+});
+$("library-back").addEventListener("click", () => {
+  ++libraryRequest;
+  const lib = state.library;
+  setState({ library: lib.album
+    ? { ...lib, album: null, loading: false, error: "" }
+    : { ...lib, artist: null, albums: [], loading: false, error: "" } });
+});
+
 $("dj-toggle").addEventListener("click", () => send({ type: isDj() ? "step_down" : "step_up" }));
 $("skip-btn").addEventListener("click", () => send({ type: "vote_skip" }));
 $("like-btn").addEventListener("click", () => send({ type: "vote_like" }));
+$("fav-btn").addEventListener("click", () => send({ type: "toggle_favorite" }));
 $("chat-send").addEventListener("click", sendChat);
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendChat();

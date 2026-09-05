@@ -65,8 +65,19 @@ class Room:
         self.current_dj_index = -1
         self.now_playing: Optional[dict] = None
         self.chat_history: list[dict] = []
+        # What has been on air, oldest first. Populated when liquidsoap drops a
+        # request (played out) or a track is voted off - never speculatively.
+        self.play_history: list[dict] = []
         self.skip_votes: set[str] = set()
         self.like_votes: set[str] = set()
+        # Whether the track on air is starred in Navidrome. Room-wide, not a vote:
+        # any listener toggles it, and it is pushed straight through to Navidrome.
+        self.favorited: bool = False
+        # The room's own listening record, keyed by Navidrome track id:
+        # {"plays": times it has been on air here, "likes": total like votes it
+        # has drawn}. Navidrome's per-user counts belong to whoever the shared
+        # login is, so the room keeps its own and surfaces them in search/library.
+        self.track_stats: dict[str, dict] = {}
         # Names/avatars outlive connections so a DJ restored from disk, or one who
         # dropped mid-set, still shows up as themselves rather than "?".
         self.known: dict[str, dict] = {}
@@ -79,6 +90,21 @@ class Room:
 
         self._sync_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        self._rating_lock = asyncio.Lock()
+        # Detached Navidrome sync-back (scrobble / rating / star). Held so they
+        # aren't garbage-collected mid-flight and can be cancelled on shutdown.
+        self._bg: set[asyncio.Task] = set()
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._bg.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._bg.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("Navidrome sync-back failed: %r", t.exception())
+
+        task.add_done_callback(_done)
 
     def _name_of(self, user_id: str) -> str:
         if user_id in self.users:
@@ -113,7 +139,9 @@ class Room:
             "skip_votes": len(self.skip_votes),
             "skip_votes_needed": self._votes_needed(),
             "like_votes": len(self.like_votes),
+            "favorited": self.favorited,
             "chat_history": self.chat_history[-50:],
+            "play_history": self.play_history[-25:],
         }
 
     def _votes_needed(self) -> int:
@@ -130,7 +158,14 @@ class Room:
                     uid: [asdict(t) for t in tracks] for uid, tracks in self.dj_queues.items()
                 },
                 "current_dj_index": self.current_dj_index,
+                "favorited": self.favorited,
+                # Votes are per-track and in-memory; without this a reload mid-song
+                # silently drops every like/skip cast so far.
+                "like_votes": sorted(self.like_votes),
+                "skip_votes": sorted(self.skip_votes),
+                "track_stats": self.track_stats,
                 "chat_history": self.chat_history[-50:],
+                "play_history": self.play_history[-50:],
                 # now_playing is derived from liquidsoap, so it is deliberately not
                 # saved - the rid is, because that's what lets us re-attach.
                 "current_rid": self.current_rid,
@@ -150,12 +185,17 @@ class Room:
         await self._publish()
 
     async def remove_user(self, user_id: str):
-        # Deliberately leaves dj_order/dj_queues untouched: identity is stable
-        # (client-generated id persisted in the browser), so a disconnect - a
-        # reload, a dropped connection - shouldn't drop someone out of the DJ
-        # rotation or wipe their queue. Only an explicit step_down does that.
+        # Identity is stable (client-generated id persisted in the browser), so a
+        # disconnect - a reload, a dropped connection - keeps a DJ their slot and
+        # queued tracks: they are expected back. But a DJ who leaves with nothing
+        # queued is just holding an empty slot in the rotation, so drop them; if
+        # they return they can step up again. Only step_down drops a DJ who still
+        # has tracks waiting.
         self.users.pop(user_id, None)
         self.skip_votes.discard(user_id)
+        if user_id in self.dj_order and not self.dj_queues.get(user_id):
+            self.dj_order.remove(user_id)
+            self.dj_queues.pop(user_id, None)
         await self._publish()
 
     async def step_up(self, user_id: str):
@@ -184,6 +224,18 @@ class Room:
             return
         queue.pop(index)
         await self._publish()
+
+    async def move_track(self, user_id: str, index: int, to: int):
+        # Only queued (not-yet-started) tracks are ever in dj_queues - the head is
+        # popped the moment it's handed to liquidsoap - so any reorder here is safe.
+        queue = self.dj_queues.get(user_id)
+        if not queue:
+            return
+        if not (0 <= index < len(queue)) or not (0 <= to < len(queue)) or index == to:
+            return
+        queue.insert(to, queue.pop(index))
+        await self._publish()
+        await self._start_next()
 
     def _pick_next(self):
         n = len(self.dj_order)
@@ -235,9 +287,11 @@ class Room:
                 queue.pop(0)
             self.skip_votes.clear()
             self.like_votes.clear()
+            self.favorited = False
             self.current_rid = rid
             self.current_record = {
                 "id": track_id,
+                "navidrome_id": track.navidrome_id,
                 "title": track.title,
                 "artist": track.artist,
                 "art_url": track.art_url,
@@ -246,6 +300,58 @@ class Room:
                 "duration": track.duration,
             }
             logger.info("Cueing %r by %s (DJ: %s)", track.title, track.artist, self._name_of(dj_id))
+
+    def _track_stat(self, song_id: str) -> dict:
+        """The room's running tally for one track, created on first touch. Read
+        with .get() elsewhere - entries persisted before a key existed lack it."""
+        entry = self.track_stats.setdefault(song_id, {})
+        entry.setdefault("plays", 0)
+        entry.setdefault("likes", 0)
+        entry.setdefault("favorites", 0)
+        return entry
+
+    def _record_played(self, record: Optional[dict]) -> None:
+        """Log a track that has just left the air so it can be seen - and requeued -
+        later. Idempotent for a given record: callers null out current_record after."""
+        if not record or not record.get("navidrome_id"):
+            return
+        self.play_history.append(
+            {
+                "navidrome_id": record["navidrome_id"],
+                "title": record.get("title", "Unknown"),
+                "artist": record.get("artist", "Unknown"),
+                "art_url": record.get("art_url"),
+                "duration": record.get("duration"),
+                "dj_name": record.get("dj_name"),
+                "ts": time.time(),
+            }
+        )
+        self.play_history = self.play_history[-50:]
+
+        # like_votes is still populated here - both callers clear it afterwards.
+        stats = self._track_stat(record["navidrome_id"])
+        stats["plays"] += 1
+        stats["likes"] += len(self.like_votes)
+
+    async def _scrobble_play(self, record: Optional[dict]) -> None:
+        """Register a finished play with Navidrome. Ratings are not touched here -
+        they are pushed the moment a vote lands (see _nudge_rating). Runs detached;
+        NavidromeClient swallows its own failures."""
+        if not record or not record.get("navidrome_id"):
+            return
+        await self.navidrome.scrobble(record["navidrome_id"], played_at=time.time())
+
+    async def _nudge_rating(self, song_id: str, delta: int) -> None:
+        """Move the track's Navidrome rating by one step, right now. Serialised: this
+        is a read-modify-write, and two people voting at once would otherwise both
+        read the old rating and one of the votes would vanish."""
+        async with self._rating_lock:
+            current = await self.navidrome.rating(song_id)
+            if current is None:
+                return
+            target = max(0, min(5, current + delta))
+            if target != current:
+                await self.navidrome.set_rating(song_id, target)
 
     async def _sync_once(self) -> None:
         """Read liquidsoap's actual state and make now_playing match it.
@@ -262,8 +368,12 @@ class Room:
         meta = await self.liquidsoap.request_metadata(rid)
         if meta is None:
             # Liquidsoap dropped the request: it played out, or failed to resolve.
+            played = self.current_record
+            self._record_played(played)
             self.current_rid = None
             self.current_record = None
+            # Rating already moved as each vote landed; only the play is news here.
+            self._spawn(self._scrobble_play(played))
             await self._go_idle()
             return
 
@@ -273,6 +383,11 @@ class Room:
         await self._show({**self.current_record, "on_air": on_air, "remaining": remaining})
 
     async def _go_idle(self) -> None:
+        # Nothing is on air, so the star/vote buttons have nothing to act on -
+        # _start_next only clears these when a *next* track actually cues.
+        self.favorited = False
+        self.like_votes.clear()
+        self.skip_votes.clear()
         await self._show(None)
         await self._start_next()
 
@@ -303,10 +418,17 @@ class Room:
                 logger.exception("sync tick failed")
             await asyncio.sleep(SYNC_INTERVAL)
 
+    def _on_air_id(self) -> Optional[str]:
+        return (self.current_record or {}).get("navidrome_id")
+
     async def vote_skip(self, user_id: str):
         if not self.now_playing or user_id not in self.users:
             return
+        if user_id in self.skip_votes:
+            return  # already counted; don't walk the rating down twice
         self.skip_votes.add(user_id)
+        if (song_id := self._on_air_id()):
+            self._spawn(self._nudge_rating(song_id, -1))
         await self._publish()
         if len(self.skip_votes) >= self._votes_needed():
             await self._skip_current()
@@ -314,10 +436,28 @@ class Room:
     async def vote_like(self, user_id: str):
         if not self.now_playing or user_id not in self.users:
             return
+        # Each vote moves the Navidrome rating as it happens, and taking a vote
+        # back moves it straight back - so a misclick costs nothing.
         if user_id in self.like_votes:
             self.like_votes.discard(user_id)
+            delta = -1
         else:
             self.like_votes.add(user_id)
+            delta = 1
+        if (song_id := self._on_air_id()):
+            self._spawn(self._nudge_rating(song_id, delta))
+        await self._publish()
+
+    async def toggle_favorite(self, user_id: str):
+        """Star / unstar the track on air in Navidrome. Any listener can flip it;
+        it's a property of the track, not a tally, so there is no per-user state."""
+        if not self.now_playing or user_id not in self.users or not self.current_record:
+            return
+        self.favorited = not self.favorited
+        song_id = self.current_record["navidrome_id"]
+        if self.favorited:
+            self._track_stat(song_id)["favorites"] += 1
+        self._spawn(self.navidrome.star(song_id, self.favorited))
         await self._publish()
 
     async def _skip_current(self):
@@ -325,10 +465,15 @@ class Room:
         await self.liquidsoap.skip()
         # Drop our handle on the skipped request; the next sync tick will observe an
         # empty deck and start whatever is next. We don't assert what's playing here.
+        skipped = self.current_record
+        self._record_played(skipped)
         self.current_rid = None
         self.current_record = None
         self.skip_votes.clear()
         self.like_votes.clear()
+        self.favorited = False
+        # Nothing to push: the rating already came down as each skip vote landed,
+        # and a track voted off the air was never a real listen, so no scrobble.
         await self._go_idle()
 
     async def chat(self, user_id: str, text: str):
@@ -356,7 +501,10 @@ class Room:
             }
             self.current_dj_index = saved.get("current_dj_index", -1)
             self.chat_history = saved.get("chat_history", [])
+            self.play_history = saved.get("play_history", [])
             self.known = saved.get("known", {})
+            self.favorited = saved.get("favorited", False)
+            self.track_stats = saved.get("track_stats", {})
             queued = sum(len(q) for q in self.dj_queues.values())
             logger.info(
                 "Restored %d DJ(s) and %d queued track(s) from disk", len(self.dj_order), queued
@@ -371,7 +519,13 @@ class Room:
             self.current_rid = saved_rid
             self.current_record = saved_record
             self.current_record["art_url"] = local_art_url(saved_record.get("art_url"))
+            # The same song is still on air, so its votes and star still apply.
+            self.like_votes = set(saved.get("like_votes", []))
+            self.skip_votes = set(saved.get("skip_votes", []))
             logger.info("Re-attached to %r already on air", saved_record.get("title"))
+        else:
+            # Whatever was playing is gone; its votes/star must not bleed onto the next.
+            self.favorited = False
 
         await self._sync_once()
 
@@ -380,6 +534,8 @@ class Room:
             self._sync_task = asyncio.create_task(self._sync_loop())
 
     async def stop(self) -> None:
+        for task in list(self._bg):
+            task.cancel()
         if self._sync_task:
             self._sync_task.cancel()
             try:

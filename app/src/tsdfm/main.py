@@ -7,6 +7,7 @@ import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qs
 
 from dotenv import find_dotenv, load_dotenv
@@ -180,14 +181,74 @@ async def index(request: Request):
     )
 
 
+def _with_room_stats(tracks: list[dict]) -> list[dict]:
+    """Tag each track with the room's own play/like counts so search and library
+    can show them. Navidrome's per-user counts are the shared login's, not ours."""
+    for track in tracks:
+        stat = room.track_stats.get(track.get("id")) or {}
+        track["plays"] = stat.get("plays", 0)
+        track["likes"] = stat.get("likes", 0)
+        track["favorites"] = stat.get("favorites", 0)
+    return tracks
+
+
 @app.get("/api/search")
 async def search(q: str):
     if not q.strip():
         return []
     try:
-        return await navidrome.search(q)
+        return _with_room_stats(await navidrome.search(q))
     except Exception as exc:
         logger.error("Search failed for %r: %s", q, exc)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/songs")
+async def songs(
+    q: str = Query(default="", max_length=500),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        return _with_room_stats(await navidrome.songs(q, offset))
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/albums")
+async def albums(
+    kind: Literal["alphabeticalByName", "alphabeticalByArtist", "random", "newest", "recent", "frequent", "starred", "highest"] = "alphabeticalByName",
+    q: str = Query(default="", max_length=500),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        return await navidrome.albums(kind, q, offset)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/album")
+async def album(id: str = Query(min_length=1, max_length=512)):
+    try:
+        result = await navidrome.album(id)
+        _with_room_stats(result.get("tracks", []))
+        return result
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/artists")
+async def artists():
+    try:
+        return await navidrome.artists()
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/api/artist")
+async def artist(id: str = Query(min_length=1, max_length=512)):
+    try:
+        return await navidrome.artist(id)
+    except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
@@ -258,6 +319,10 @@ async def ws_endpoint(websocket: WebSocket):
                 await room.add_track(user_id, track)
             elif mtype == "remove_track":
                 await room.remove_track(user_id, int(msg.get("index", -1)))
+            elif mtype == "move_track":
+                await room.move_track(
+                    user_id, int(msg.get("from", -1)), int(msg.get("to", -1))
+                )
             elif mtype == "chat":
                 text = (msg.get("text") or "").strip()
                 if text:
@@ -266,6 +331,8 @@ async def ws_endpoint(websocket: WebSocket):
                 await room.vote_skip(user_id)
             elif mtype == "vote_like":
                 await room.vote_like(user_id)
+            elif mtype == "toggle_favorite":
+                await room.toggle_favorite(user_id)
 
     except WebSocketDisconnect:
         pass

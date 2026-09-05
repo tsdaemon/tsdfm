@@ -46,8 +46,8 @@ services:
       # no extra port or network wiring is needed.
       homepage.group: Applications
       homepage.name: tsdfm
-      homepage.icon: "http://${APP_PUBLIC_URL}/static/icon/android-chrome-192x192.png"
-      homepage.href: "http://${APP_PUBLIC_URL}"
+      homepage.icon: "${APP_PUBLIC_URL}/static/icon/android-chrome-192x192.png"
+      homepage.href: "${APP_PUBLIC_URL}"
       homepage.description: Turntable.fm-style radio for friends
       homepage.widget.type: customapi
       homepage.widget.url: "http://${APP_HOSTNAME_LOCAL}/api/stats"

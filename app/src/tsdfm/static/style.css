@@ -100,33 +100,16 @@ button:active:not(:disabled) { transform: scale(0.96); }
    that so the golden-ratio split actually holds regardless of content */
 #app > div { min-width: 0; }
 
-.player-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
-  align-items: stretch;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.player-row > .panel {
-  min-width: 0;
-  margin-bottom: 0;
-}
-
-.branding {
-  position: relative;
-  min-width: 0;
-  overflow: hidden;
-  border-radius: 10px;
-}
+.player-row { margin-bottom: 16px; }
+.player-row > .panel { min-width: 0; margin-bottom: 0; }
 
 .brand-logo {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
+  width: 32px;
+  height: 32px;
   object-fit: contain;
+  display: block;
+  flex-shrink: 0;
+  margin-right: 4px;
 }
 
 .panel {
@@ -219,12 +202,22 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 #search-results li { padding: 6px 4px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; cursor: pointer; }
 #search-results li:hover { background: #262834; }
 #search-results li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#search-results li .track-duration { flex-shrink: 0; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Room-local play/like counts, shown in search rows and album track lists. */
+.track-stats { flex-shrink: 0; margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.album-tracks .track-stats { margin-left: 0; }
+#search-results li .track-stats + .track-duration { margin-left: 12px; }
 
 #chat-log { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 #chat-log li .user { color: var(--accent); font-weight: 600; margin-right: 6px; }
 
 .row { display: flex; gap: 8px; margin-top: 8px; }
 .row input { flex: 1; }
+
+/* Favourite (Navidrome star) - neutral until toggled on, then a filled heart. */
+#fav-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+#fav-btn.active { color: #f472b6; border-color: #f472b6; }
 
 #listeners { color: var(--muted); font-size: 13px; }
 
@@ -250,14 +243,157 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
   padding: 4px 8px;
 }
 
-#my-queue-list { list-style: none; margin: 0; padding: 0; }
-#my-queue-list li {
+#my-queue-list, #library-queue-list, #history-list { list-style: none; margin: 0; padding: 0; }
+#my-queue-list li, #library-queue-list li, #history-list li {
   padding: 6px 4px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 8px;
 }
-#my-queue-list li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#my-queue-list li span, #library-queue-list li span, #history-list li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#library-queue-list li span, #history-list li span { font-size: 13px; }
+
+/* Queue rows reorder by dragging the whole row. */
+.queue-row[draggable="true"] { cursor: grab; }
+.queue-row.dragging { opacity: 0.4; cursor: grabbing; }
+.queue-row.drop-target { box-shadow: inset 0 2px 0 var(--accent); }
+#my-queue-list .icon-btn, #library-queue-list .icon-btn, #history-list .icon-btn { padding: 3px 4px; }
+#library-queue-list .icon-btn svg, #history-list .icon-btn svg { width: 13px; height: 13px; }
+
+/* Recently-played rows requeue on click, matching the library's contract. */
+.history-row.queueable { cursor: pointer; }
+.history-row.queueable:hover { background: #262834; border-radius: 4px; }
+.history-row.queueable:hover .icon-btn { color: var(--accent); }
+.history-row .icon-btn { pointer-events: none; }
 
 #search-status { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+[hidden] { display: none !important; }
+.view-tabs { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+.view-tabs button, #library-filters button { background: transparent; color: var(--muted); }
+.view-tabs button[aria-pressed="true"], #library-filters button[aria-pressed="true"] { background: #20382e; color: var(--accent); }
+
+/* Compact "now playing" that stands in for the On Air panel while browsing. */
+#nav-now-playing { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 46%; padding: 4px 8px; font-weight: 500; }
+#nav-now-playing:hover:not(:disabled) { background: var(--panel); color: var(--text); filter: none; }
+#nav-np-art { width: 24px; height: 24px; border-radius: 4px; object-fit: cover; background: #101216; flex-shrink: 0; }
+#nav-np-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+#nav-live-dot { flex-shrink: 0; margin-right: 0; }
+
+#app.library-view { max-width: 1400px; grid-template-columns: minmax(0, 1fr); }
+.library-view #room-main, .library-view #room-sidebar { display: none !important; }
+#library-panel { display: grid; grid-template-columns: 180px minmax(0, 1fr) 264px; gap: 24px; min-height: 60vh; }
+#library-queue { min-width: 0; align-self: start; position: sticky; top: 16px; }
+#library-queue h2 { margin-bottom: 8px; }
+#library-filters { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+#library-filters button { text-align: left; }
+.library-content { min-width: 0; }
+.library-content h1 { font-size: 24px; margin: 0 0 16px; }
+#library-search { max-width: 540px; }
+.album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 24px 18px; }
+.album-card { display: flex; flex-direction: column; align-items: stretch; min-width: 0; background: transparent; color: var(--text); text-align: left; font-weight: 400; padding: 0; border-radius: 8px; }
+.album-card:hover { background: var(--panel); }
+.album-card img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; margin-bottom: 8px; }
+.album-card strong, .album-card span, .album-card small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.album-card strong { font-size: 14px; font-weight: 500; }
+.album-card span, .album-card small { color: var(--muted); font-size: 13px; }
+#artist-list { display: flex; flex-direction: column; }
+.artist-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; background: transparent; color: var(--text); font-weight: 400; text-align: left; padding: 11px 8px; border: none; border-bottom: 1px solid var(--border); border-radius: 0; }
+.artist-row:hover { background: var(--panel); }
+.artist-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.artist-count { flex-shrink: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.library-pagination { margin: 24px 0; align-items: center; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.album-header { display: flex; gap: 24px; align-items: center; margin: 20px 0; }
+.album-header img { width: 180px; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+.album-tracks { list-style: none; padding: 0; }
+.album-tracks li { display: flex; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--border); border-radius: 6px; }
+.album-tracks li > span:first-of-type { min-width: 0; flex: 1; }
+.album-tracks li.queueable { cursor: pointer; transition: background 0.12s ease; }
+.album-tracks li.queueable:hover { background: #262834; }
+.album-tracks li.queueable:active { background: #2f3140; }
+.album-tracks .track-duration { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--muted); }
+.album-tracks .track-add-hint { flex-shrink: 0; width: 72px; text-align: right; color: var(--muted); font-size: 12px; }
+.album-tracks li.queueable:hover .track-add-hint { color: var(--accent); }
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(90vw, 420px);
+  padding: 11px 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #06120c;
+  font-weight: 600;
+  font-size: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transform: translate(-50%, 12px);
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+#toast::before { content: "✓"; font-size: 15px; }
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* Row acknowledgement for a queue action: a quick tinted flash on the clicked
+   row (state-driven, so it rides through the list rebuild) plus a label that
+   flies up off <body> (detached, purely presentational). */
+@keyframes row-flash {
+  0%, 12% { background: rgba(110, 231, 183, 0.32); }
+  100% { background: transparent; }
+}
+.album-tracks li.flash, #search-results li.flash, #history-list li.flash { animation: row-flash 0.55s ease-out; }
+
+/* The same gesture, refused: queueing is DJ-only, so a non-DJ click flashes red
+   instead of quietly doing nothing. */
+@keyframes row-deny {
+  0%, 12% { background: rgba(248, 113, 113, 0.32); }
+  100% { background: transparent; }
+}
+.album-tracks li.deny, #search-results li.deny, #history-list li.deny { animation: row-deny 0.55s ease-out; }
+#toast.deny { background: #f87171; color: #2a0808; }
+#toast.deny::before { content: "✕"; }
+
+.queue-fly {
+  position: fixed;
+  z-index: 120;
+  pointer-events: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  will-change: transform, opacity;
+  transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.6s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #toast { transition: opacity 0.18s ease; transform: translate(-50%, 0); }
+  .album-tracks li.flash, #search-results li.flash, #history-list li.flash { animation: none; }
+  .album-tracks li.deny, #search-results li.deny, #history-list li.deny { animation: none; }
+  .queue-fly { display: none; }
+}
+/* Below this the third rail gets too cramped - drop it; the Radio room's own
+   "Up next" is still there. */
+@media (max-width: 1080px) {
+  #library-panel { grid-template-columns: 180px minmax(0, 1fr); }
+  #library-queue { display: none; }
+}
+@media (max-width: 650px) {
+  #app { padding: 12px; grid-template-columns: minmax(0, 1fr); }
+  #library-panel { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  #library-filters { flex-direction: row; overflow-x: auto; }
+  #library-filters button { flex-shrink: 0; }
+  .album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .album-header img { width: 100px; }
+  .album-tracks .art { display: none; }
+  #nav-now-playing { max-width: 100%; }
+}

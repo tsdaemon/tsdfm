@@ -51,3 +51,16 @@ async def test_proxy_validates_request(api, query):
         await client.post("/api/session", json={"invite": "test-invite"})
         response = await client.get("/api/cover-art?" + query)
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/api/albums", "/api/album?id=a1", "/api/artists", "/api/artist?id=a1"])
+async def test_library_requires_session(api, path):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="https://radio.test") as client:
+        assert (await client.get(path)).status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/api/albums?kind=invalid", "/api/albums?offset=-1", "/api/album?id=", "/api/artist?id="])
+async def test_library_validates_request(api, path):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="https://radio.test") as client:
+        await client.post("/api/session", json={"invite": "test-invite"})
+        assert (await client.get(path)).status_code == 422

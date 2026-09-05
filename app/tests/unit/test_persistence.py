@@ -104,6 +104,19 @@ async def test_resume_starts_fresh_when_the_request_is_gone(tmp_path):
     assert room.current_rid is None
 
 
+async def test_track_stats_survive_a_restart(tmp_path):
+    """The room's own play/like tallies are persisted like everything else."""
+    path = tmp_path / "state.json"
+    room, _ = make_room(FakeLiquidsoap(), state_path=path)
+    room.track_stats = {"nd-1": {"plays": 3, "likes": 5}}
+    room._persist()
+
+    revived, _ = make_room(FakeLiquidsoap(), state_path=path)
+    await revived.resume()
+
+    assert revived.track_stats == {"nd-1": {"plays": 3, "likes": 5}}
+
+
 async def test_persistence_is_optional(tmp_path):
     """With no state_path the room just doesn't persist - used by most tests."""
     room, _ = make_room(FakeLiquidsoap())

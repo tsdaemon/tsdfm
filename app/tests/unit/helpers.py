@@ -4,6 +4,8 @@ Kept out of the test modules themselves so both the state and persistence tests 
 drive the same fake liquidsoap without one importing the other.
 """
 
+import asyncio
+
 from tsdfm.liquidsoap_control import LiquidsoapUnavailable
 from tsdfm.state import Room, Track
 
@@ -84,8 +86,29 @@ class FakeLiquidsoap:
 
 
 class FakeNavidrome:
+    """Records the sync-back calls the room makes and answers rating() from a dict."""
+
+    def __init__(self, ratings=None):
+        self.scrobbled = []          # (song_id, played_at)
+        self.stars = []              # (song_id, starred)
+        self.set_ratings = []        # (song_id, value)
+        self.ratings = dict(ratings or {})  # song_id -> current userRating
+
     def stream_url(self, navidrome_id):
         return f"http://navidrome.test/stream/{navidrome_id}"
+
+    async def scrobble(self, song_id, played_at=None):
+        self.scrobbled.append((song_id, played_at))
+
+    async def star(self, song_id, starred=True):
+        self.stars.append((song_id, starred))
+
+    async def rating(self, song_id):
+        return self.ratings.get(song_id, 0)
+
+    async def set_rating(self, song_id, value):
+        self.set_ratings.append((song_id, value))
+        self.ratings[song_id] = value
 
 
 def make_room(liquidsoap=None, state_path=None):
@@ -105,3 +128,9 @@ def make_room(liquidsoap=None, state_path=None):
 
 def track(title="Song", artist="Artist", duration=200, navidrome_id="id1"):
     return Track(navidrome_id=navidrome_id, title=title, artist=artist, duration=duration)
+
+
+async def drain(room):
+    """Let the room's detached Navidrome sync-back tasks run to completion."""
+    while room._bg:
+        await asyncio.gather(*list(room._bg))
