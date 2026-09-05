@@ -1,0 +1,11 @@
+.env
+
+# uv keeps the environment reproducible from uv.lock, which IS tracked
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# go-task's checksum cache
+.task/

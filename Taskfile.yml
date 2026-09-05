@@ -1,0 +1,99 @@
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  APP_DIR: app
+
+tasks:
+  sync:
+    desc: Install/refresh the app's uv environment
+    dir: "{{.APP_DIR}}"
+    sources:
+      - pyproject.toml
+      - uv.lock
+    cmds:
+      - uv sync
+
+  invite:
+    desc: Print the universal invite link (generates INVITE_TOKEN in .env on first run)
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - uv run tsdfm-invite
+
+  infra:up:
+    desc: Start Icecast + Liquidsoap only (app runs locally instead, see 'dev')
+    cmds:
+      - docker compose up -d icecast liquidsoap
+
+  infra:down:
+    desc: Stop Icecast + Liquidsoap
+    cmds:
+      - docker compose stop icecast liquidsoap
+
+  infra:logs:
+    desc: Tail Icecast + Liquidsoap logs
+    cmds:
+      - docker compose logs -f icecast liquidsoap
+
+  dev:
+    desc: Run the app locally with autoreload, against dockerized Icecast/Liquidsoap
+    deps: [sync, infra:up]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - uv run uvicorn tsdfm.main:app --reload --reload-dir src --host 0.0.0.0 --port 8080
+
+  # PYTHONPATH is cleared because ROS puts itself on the system PYTHONPATH; left
+  # set, pytest autoloads its plugins and dies on a missing 'lark'.
+  test:
+    desc: Run the unit tests (fast, no services needed)
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - PYTHONPATH= uv run pytest tests/unit -q
+
+  test:e2e:
+    desc: Run end-to-end tests against a running stack (disruptive - queues real tracks)
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - PYTHONPATH= uv run pytest tests/e2e -q -m e2e
+
+  test:all:
+    desc: Run unit and e2e tests
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - PYTHONPATH= uv run pytest -q
+
+  up:
+    desc: Run the full stack in Docker (icecast + liquidsoap + app)
+    cmds:
+      - docker compose up -d --build
+
+  down:
+    desc: Stop the full Docker stack
+    cmds:
+      - docker compose down
+
+  restart:
+    desc: Rebuild and restart just the app container
+    cmds:
+      - docker compose up -d --build app
+
+  logs:
+    desc: Tail all docker compose logs
+    cmds:
+      - docker compose logs -f
+
+  build:
+    desc: Rebuild all docker images
+    cmds:
+      - docker compose build
+
+  clean:
+    desc: Stop containers and remove the local uv environment
+    cmds:
+      - docker compose down
+      - rm -rf {{.APP_DIR}}/.venv
