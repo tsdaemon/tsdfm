@@ -32,6 +32,17 @@ const AVATAR_EMOJI = [
   "🍕", "🎧", "🎸", "⚡", "🔥", "🌟", "👑", "💀",
 ];
 
+// Palette themes. `colors` is only the picker swatch - the values that actually
+// paint the UI live in style.css under :root[data-theme="<key>"]. `ember` is the
+// default and matches the bare :root block there.
+const THEMES = [
+  { key: "ember", label: "Midnight Ember", colors: ["#000000", "#233d4d", "#fe7f2d", "#eaecf0"] },
+  { key: "lagoon", label: "Lagoon", colors: ["#224248", "#325e6a", "#44a1a4", "#ff9a00"] },
+  { key: "pine", label: "Pine", colors: ["#092328", "#12544f", "#2a835f", "#8bbb92"] },
+  { key: "daylight", label: "Daylight", colors: ["#f5f5f5", "#76abae", "#303841", "#ff5722"] },
+];
+const DEFAULT_THEME = "ember";
+
 const $ = (id) => document.getElementById(id);
 
 function escapeHtml(s) {
@@ -91,6 +102,7 @@ const INVITE_KEY = "tsdfm_invite";
 const CLIENT_ID_KEY = "tsdfm_client_id";
 const NAME_KEY = "tsdfm_name";
 const AVATAR_KEY = "tsdfm_avatar";
+const THEME_KEY = "tsdfm_theme";
 
 function resolveInvite() {
   const url = new URL(location.href);
@@ -112,11 +124,17 @@ function resolveClientId() {
   return id;
 }
 
+function resolveTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  return THEMES.some((t) => t.key === saved) ? saved : DEFAULT_THEME;
+}
+
 const invite = resolveInvite();
 const clientId = resolveClientId();
 
 // --------------------------------------------------------------------- state
 
+const HISTORY_PAGE_SIZE = 10;
 const state = {
   // "need-invite" | "naming" | "connecting" | "live" | "disconnected"
   phase: "connecting",
@@ -127,6 +145,8 @@ const state = {
   },
   draftAvatar: AVATAR_EMOJI[Math.floor(Math.random() * AVATAR_EMOJI.length)],
   editingProfile: false,
+  theme: resolveTheme(),
+  themeMenuOpen: false,
 
   nowPlaying: null,      // server's record, plus on_air/remaining
   remainingAt: 0,        // when `remaining` was received, for smooth local ticking
@@ -134,6 +154,7 @@ const state = {
   listeners: [],
   chat: [],
   history: [],           // recently played, oldest first (as sent by the server)
+  historyPage: 0,
   logs: [],
   votes: { skip: 0, skipNeeded: 1, like: 0 },
   favorited: false,      // current track starred in Navidrome
@@ -147,6 +168,7 @@ const state = {
 
 function setState(patch) {
   Object.assign(state, patch);
+  state.historyPage = Math.max(0, Math.min(state.historyPage, Math.ceil(state.history.length / HISTORY_PAGE_SIZE) - 1));
   render();
 }
 
@@ -174,9 +196,11 @@ function myQueue() {
 const memo = { djQueueLengths: {}, myQueueLength: 0, libQueueLength: 0, chatCount: 0, logCount: 0 };
 
 function render() {
+  document.documentElement.dataset.theme = state.theme;
   renderOverlay();
   if (state.phase !== "live") return;
   renderProfile();
+  renderTheme();
   renderNowPlaying();
   renderNavStrip();
   renderDjBooth();
@@ -254,6 +278,53 @@ function renderProfile() {
       setState({ draftAvatar: emoji })
     );
   }
+}
+
+const swatchHtml = (colors) => colors.map((c) => `<i style="background:${c}"></i>`).join("");
+
+// Built once (the palette list is static); render() only syncs open/selected.
+function buildThemeMenu() {
+  const menu = $("theme-menu");
+  if (!menu) return;
+  menu.innerHTML = THEMES.map(
+    (t) =>
+      `<button type="button" class="theme-option" role="option" data-theme-key="${t.key}" title="${t.label}" aria-label="${t.label}">` +
+        `<span class="theme-swatch" aria-hidden="true">${swatchHtml(t.colors)}</span>` +
+      `</button>`
+  ).join("");
+  menu.querySelectorAll(".theme-option").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      localStorage.setItem(THEME_KEY, btn.dataset.themeKey);
+      setState({ theme: btn.dataset.themeKey, themeMenuOpen: false });
+    });
+  });
+  $("theme-trigger").addEventListener("click", () =>
+    setState({ themeMenuOpen: !state.themeMenuOpen })
+  );
+  // Dismiss on an outside click or Escape.
+  document.addEventListener("click", (e) => {
+    if (state.themeMenuOpen && !e.target.closest("#theme-picker")) {
+      setState({ themeMenuOpen: false });
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.themeMenuOpen) setState({ themeMenuOpen: false });
+  });
+}
+
+function renderTheme() {
+  const theme = THEMES.find((t) => t.key === state.theme);
+  const swatch = $("theme-swatch");
+  if (swatch && swatch.dataset.theme !== state.theme) {
+    swatch.dataset.theme = state.theme;
+    swatch.innerHTML = swatchHtml(theme ? theme.colors : []);
+  }
+  $("theme-trigger-name").textContent = theme ? theme.label : "";
+  $("theme-trigger").setAttribute("aria-expanded", String(state.themeMenuOpen));
+  $("theme-menu").hidden = !state.themeMenuOpen;
+  $("theme-menu").querySelectorAll(".theme-option").forEach((btn) => {
+    btn.setAttribute("aria-selected", String(btn.dataset.themeKey === state.theme));
+  });
 }
 
 function renderNowPlaying() {
@@ -437,14 +508,24 @@ function renderListeners() {
 // back on their own queue (same click-to-queue contract as the library).
 function renderHistory() {
   const list = $("history-list");
+  const pageSize = HISTORY_PAGE_SIZE;
+  const pages = Math.max(1, Math.ceil(state.history.length / pageSize));
+  const entries = state.history.slice().reverse().slice(state.historyPage * pageSize, (state.historyPage + 1) * pageSize);
+  $("history-pagination").hidden = pages === 1;
+  $("history-page").textContent = `Page ${state.historyPage + 1} of ${pages}`;
+  $("history-prev").disabled = state.historyPage === 0;
+  $("history-next").disabled = state.historyPage >= pages - 1;
+  const dj = isDj();
+  // Keep the scroll position and focused rows intact during unrelated updates.
+  const key = JSON.stringify([entries, state.historyPage, dj, state.justQueued?.id]);
+  if (memo.historyKey === key) return;
+  memo.historyKey = key;
   list.innerHTML = "";
   if (state.history.length === 0) {
     list.innerHTML = '<li class="meta">Nothing has played yet.</li>';
     return;
   }
-  const dj = isDj();
-  for (let i = state.history.length - 1; i >= 0; i--) {
-    const h = state.history[i];
+  for (const h of entries) {
     const track = {
       id: h.navidrome_id, title: h.title, artist: h.artist,
       duration: h.duration, art_url: h.art_url,
@@ -467,6 +548,8 @@ function renderHistory() {
     li.addEventListener("click", () => queueTrack(track, li));
     list.appendChild(li);
   }
+  if (memo.historyPage !== state.historyPage) list.scrollTop = 0;
+  memo.historyPage = state.historyPage;
 }
 
 // Chat and logs only ever grow, so they append rather than rebuild - rebuilding
@@ -1059,6 +1142,9 @@ async function startPlayback() {
 
 // ---------------------------------------------------------------------- wiring
 
+$("history-prev").addEventListener("click", () => setState({ historyPage: state.historyPage - 1 }));
+$("history-next").addEventListener("click", () => setState({ historyPage: state.historyPage + 1 }));
+
 muteBtn.addEventListener("click", () => {
   if (audioIsAudible()) {
     radioAudio.muted = true;
@@ -1133,6 +1219,8 @@ $("profile-edit-btn").addEventListener("click", () =>
 );
 $("profile-save-btn").addEventListener("click", saveProfile);
 $("profile-cancel-btn").addEventListener("click", () => setState({ editingProfile: false }));
+
+buildThemeMenu();
 
 // ------------------------------------------------------------------- bootstrap
 

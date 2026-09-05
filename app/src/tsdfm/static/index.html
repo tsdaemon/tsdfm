@@ -10,6 +10,14 @@
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icon/apple-touch-icon.png?v={{ asset_version }}" />
   <link rel="manifest" href="/static/icon/site.webmanifest?v={{ asset_version }}" />
   <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}" />
+  <script>
+    // Apply the saved palette theme before first paint, so there's no flash of
+    // the default. app.js is the source of truth for the key and valid values.
+    try {
+      var t = localStorage.getItem("tsdfm_theme");
+      if (t) document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
 </head>
 <body>
   <div id="join-overlay">
@@ -29,6 +37,13 @@
         <img id="nav-np-art" alt="" />
         <span id="nav-np-text"></span>
       </button>
+      <div class="theme-picker" id="theme-picker">
+        <button type="button" class="theme-trigger" id="theme-trigger" aria-haspopup="listbox" aria-expanded="false" title="Colour theme">
+          <span class="theme-swatch" id="theme-swatch" aria-hidden="true"></span>
+          <span class="theme-trigger-name" id="theme-trigger-name"></span>
+        </button>
+        <div class="theme-menu" id="theme-menu" role="listbox" aria-label="Colour theme" hidden></div>
+      </div>
     </nav>
     <div id="room-main">
       <div class="player-row">
@@ -112,7 +127,12 @@
 
       <div class="panel">
         <h2>Recently played</h2>
-        <ul id="history-list"></ul>
+        <ul id="history-list" tabindex="0" aria-label="Recently played tracks"></ul>
+        <nav id="history-pagination" class="row history-pagination" aria-label="Recently played pages" hidden>
+          <button id="history-prev" type="button" aria-controls="history-list">Previous</button>
+          <span id="history-page" class="meta" role="status"></span>
+          <button id="history-next" type="button" aria-controls="history-list">Next</button>
+        </nav>
       </div>
 
       <div class="panel">

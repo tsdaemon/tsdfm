@@ -1,11 +1,80 @@
 :root {
   color-scheme: dark;
-  --bg: #14151a;
-  --panel: #1d1f26;
-  --border: #2c2f3a;
-  --text: #e8e8ec;
-  --muted: #8b8fa3;
-  --accent: #6ee7b7;
+
+  /* Palette seeds - each theme overrides these six, everything below derives
+     from them. Themes are keyed off <html data-theme="...">, set by app.js (and
+     pre-paint by the inline script in index.html). The default here is the
+     "ember" palette: https://colorhunt.co/palette/000000233d4dfe7f2deaecf0 */
+  --c-bg: #000000;
+  --c-panel: #10212c;
+  --c-border: #233d4d;
+  --c-text: #eaecf0;
+  --c-accent: #fe7f2d;
+  --c-accent-contrast: #1a0f00;
+
+  /* Derived roles - referenced everywhere else in this file. */
+  --bg: var(--c-bg);
+  --panel: var(--c-panel);
+  --border: var(--c-border);
+  --text: var(--c-text);
+  --muted: color-mix(in srgb, var(--c-text) 58%, var(--c-panel));
+  --accent: var(--c-accent);
+  --accent-text: var(--c-accent-contrast);
+  /* Label colour for a selected pill (sits on --accent-tint). Accent reads well
+     on the dark themes' tints, but not on a light one - daylight overrides it. */
+  --accent-on-tint: var(--c-accent);
+  --well: color-mix(in srgb, var(--c-bg) 90%, var(--c-text));
+  --hover: color-mix(in srgb, var(--c-panel) 88%, var(--c-text));
+  --active: color-mix(in srgb, var(--c-panel) 74%, var(--c-text));
+  --accent-tint: color-mix(in srgb, var(--c-accent) 20%, var(--c-panel));
+
+  /* Signal colours - shared across themes, overridden only where a theme's
+     background needs a different value for contrast. */
+  --danger: #f87171;
+  --danger-text: #2a0808;
+  --warning: #fbbf24;
+  --fav: #f472b6;
+}
+
+/* Lagoon - deep teal with an amber pop.
+   https://colorhunt.co/palette/224248325e6a44a1a4ff9a00 */
+:root[data-theme="lagoon"] {
+  --c-bg: #12282c;
+  --c-panel: #1b3a41;
+  --c-border: #325e6a;
+  --c-text: #eaf4f4;
+  --c-accent: #ff9a00;
+  --c-accent-contrast: #1a1000;
+}
+
+/* Pine - forest greens.
+   https://colorhunt.co/palette/09232812544f2a835f8bbb92 */
+:root[data-theme="pine"] {
+  --c-bg: #071b1f;
+  --c-panel: #0e2f30;
+  --c-border: #12544f;
+  --c-text: #e4f0e7;
+  --c-accent: #35a074;
+  --c-accent-contrast: #04140d;
+}
+
+/* Daylight - the one light theme.
+   https://colorhunt.co/palette/f5f5f576abae303841ff5722 */
+:root[data-theme="daylight"] {
+  color-scheme: light;
+  --c-bg: #f5f5f5;
+  --c-panel: #ffffff;
+  --c-border: #cdd8d9;
+  --c-text: #303841;
+  --c-accent: #ff5722;
+  --c-accent-contrast: #3d1200;
+  --accent-on-tint: var(--c-text);
+  /* Insets and hovers read the other way round on a light ground. */
+  --well: color-mix(in srgb, var(--c-bg) 88%, var(--c-text));
+  --hover: color-mix(in srgb, var(--c-panel) 92%, var(--c-text));
+  --active: color-mix(in srgb, var(--c-panel) 84%, var(--c-text));
+  --danger: #d32f2f;
+  --danger-text: #fff1f1;
 }
 
 * { box-sizing: border-box; }
@@ -49,24 +118,95 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #101216;
+  background: var(--well);
   border: 2px solid transparent;
 }
-.avatar-choice.selected { border-color: var(--accent); background: #1b2b24; }
+.avatar-choice.selected { border-color: var(--accent); background: var(--accent-tint); }
+
+/* Theme picker: pinned to the right of the top nav. Collapsed it's just a live
+   swatch of the active palette; open, the trigger reveals the theme's name and a
+   menu drops down listing every palette as bare colour swatches. */
+.theme-picker { margin-left: auto; position: relative; flex-shrink: 0; }
+
+.theme-swatch {
+  display: inline-flex;
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.theme-swatch i { width: 7px; height: 14px; display: block; }
+
+.theme-trigger {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.theme-trigger:hover:not(:disabled),
+.theme-trigger[aria-expanded="true"] { filter: none; color: var(--text); border-color: var(--border); }
+
+/* The name is width-collapsed until the picker is open, so it "expands" in. */
+.theme-trigger-name {
+  max-width: 0;
+  margin-left: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 0;
+  font-size: 13px;
+  font-weight: 500;
+  transition: max-width 0.2s ease, opacity 0.2s ease, margin 0.2s ease;
+}
+.theme-trigger[aria-expanded="true"] .theme-trigger-name { max-width: 140px; margin-left: 8px; opacity: 1; }
+
+.theme-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.theme-option {
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+.theme-option:hover:not(:disabled) { filter: none; background: var(--hover); }
+.theme-option[aria-selected="true"] { border-color: var(--accent); }
+.theme-option .theme-swatch i { width: 16px; height: 18px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-trigger-name { transition: none; }
+}
 
 input, button {
   font: inherit;
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid var(--border);
-  background: #101216;
+  background: var(--well);
   color: var(--text);
 }
 
 button {
   cursor: pointer;
   background: var(--accent);
-  color: #06120c;
+  color: var(--accent-text);
   border: none;
   font-weight: 600;
   display: inline-flex;
@@ -134,7 +274,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #f87171;
+  background: var(--danger);
   margin-right: 6px;
   animation: pulse 1.6s ease-in-out infinite;
 }
@@ -155,7 +295,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 .art {
   border-radius: 6px;
   object-fit: cover;
-  background: #101216;
+  background: var(--well);
   flex-shrink: 0;
 }
 .art-lg { width: 64px; height: 64px; }
@@ -166,7 +306,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 #now-playing .position { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 4px; }
 
 .progress-bar {
-  background: #101216;
+  background: var(--well);
   border-radius: 4px;
   height: 6px;
   overflow: hidden;
@@ -200,7 +340,7 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 
 #search-results { list-style: none; margin: 8px 0 0; padding: 0; max-height: 220px; overflow-y: auto; }
 #search-results li { padding: 6px 4px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; cursor: pointer; }
-#search-results li:hover { background: #262834; }
+#search-results li:hover { background: var(--hover); }
 #search-results li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #search-results li .track-duration { flex-shrink: 0; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -217,11 +357,11 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 
 /* Favourite (Navidrome star) - neutral until toggled on, then a filled heart. */
 #fav-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-#fav-btn.active { color: #f472b6; border-color: #f472b6; }
+#fav-btn.active { color: var(--fav); border-color: var(--fav); }
 
 #listeners { color: var(--muted); font-size: 13px; }
 
-.error-text { color: #f87171; font-size: 13px; margin-top: 6px; }
+.error-text { color: var(--danger); font-size: 13px; margin-top: 6px; }
 
 #log-panel {
   list-style: none;
@@ -233,8 +373,8 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
   font-size: 12px;
 }
 #log-panel li { padding: 3px 0; border-bottom: 1px solid var(--border); color: var(--muted); overflow-wrap: anywhere; }
-#log-panel li.level-ERROR { color: #f87171; }
-#log-panel li.level-WARNING { color: #fbbf24; }
+#log-panel li.level-ERROR { color: var(--danger); }
+#log-panel li.level-WARNING { color: var(--warning); }
 #log-panel li .log-time { opacity: 0.6; margin-right: 6px; }
 
 .icon-btn {
@@ -262,8 +402,13 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 #library-queue-list .icon-btn svg, #history-list .icon-btn svg { width: 13px; height: 13px; }
 
 /* Recently-played rows requeue on click, matching the library's contract. */
+#history-list { max-height: 300px; overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--muted) var(--panel); }
+#history-list:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history-pagination { align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.history-pagination button { padding: 6px 10px; }
+.history-pagination .meta { font-size: 12px; }
 .history-row.queueable { cursor: pointer; }
-.history-row.queueable:hover { background: #262834; border-radius: 4px; }
+.history-row.queueable:hover { background: var(--hover); border-radius: 4px; }
 .history-row.queueable:hover .icon-btn { color: var(--accent); }
 .history-row .icon-btn { pointer-events: none; }
 
@@ -272,12 +417,12 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 [hidden] { display: none !important; }
 .view-tabs { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
 .view-tabs button, #library-filters button { background: transparent; color: var(--muted); }
-.view-tabs button[aria-pressed="true"], #library-filters button[aria-pressed="true"] { background: #20382e; color: var(--accent); }
+.view-tabs button[aria-pressed="true"], #library-filters button[aria-pressed="true"] { background: var(--accent-tint); color: var(--accent-on-tint); }
 
 /* Compact "now playing" that stands in for the On Air panel while browsing. */
 #nav-now-playing { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 46%; padding: 4px 8px; font-weight: 500; }
 #nav-now-playing:hover:not(:disabled) { background: var(--panel); color: var(--text); filter: none; }
-#nav-np-art { width: 24px; height: 24px; border-radius: 4px; object-fit: cover; background: #101216; flex-shrink: 0; }
+#nav-np-art { width: 24px; height: 24px; border-radius: 4px; object-fit: cover; background: var(--well); flex-shrink: 0; }
 #nav-np-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #nav-live-dot { flex-shrink: 0; margin-right: 0; }
 
@@ -312,8 +457,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .album-tracks li { display: flex; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--border); border-radius: 6px; }
 .album-tracks li > span:first-of-type { min-width: 0; flex: 1; }
 .album-tracks li.queueable { cursor: pointer; transition: background 0.12s ease; }
-.album-tracks li.queueable:hover { background: #262834; }
-.album-tracks li.queueable:active { background: #2f3140; }
+.album-tracks li.queueable:hover { background: var(--hover); }
+.album-tracks li.queueable:active { background: var(--active); }
 .album-tracks .track-duration { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--muted); }
 .album-tracks .track-add-hint { flex-shrink: 0; width: 72px; text-align: right; color: var(--muted); font-size: 12px; }
 .album-tracks li.queueable:hover .track-add-hint { color: var(--accent); }
@@ -330,7 +475,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
   padding: 11px 18px;
   border-radius: 999px;
   background: var(--accent);
-  color: #06120c;
+  color: var(--accent-text);
   font-weight: 600;
   font-size: 14px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
@@ -346,7 +491,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
    row (state-driven, so it rides through the list rebuild) plus a label that
    flies up off <body> (detached, purely presentational). */
 @keyframes row-flash {
-  0%, 12% { background: rgba(110, 231, 183, 0.32); }
+  0%, 12% { background: color-mix(in srgb, var(--accent) 32%, transparent); }
   100% { background: transparent; }
 }
 .album-tracks li.flash, #search-results li.flash, #history-list li.flash { animation: row-flash 0.55s ease-out; }
@@ -354,11 +499,11 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 /* The same gesture, refused: queueing is DJ-only, so a non-DJ click flashes red
    instead of quietly doing nothing. */
 @keyframes row-deny {
-  0%, 12% { background: rgba(248, 113, 113, 0.32); }
+  0%, 12% { background: color-mix(in srgb, var(--danger) 32%, transparent); }
   100% { background: transparent; }
 }
 .album-tracks li.deny, #search-results li.deny, #history-list li.deny { animation: row-deny 0.55s ease-out; }
-#toast.deny { background: #f87171; color: #2a0808; }
+#toast.deny { background: var(--danger); color: var(--danger-text); }
 #toast.deny::before { content: "✕"; }
 
 .queue-fly {
