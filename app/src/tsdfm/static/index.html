@@ -16,7 +16,7 @@
   <div id="app">
     <div>
       <div class="panel" id="now-playing">
-        <h2>On Air</h2>
+        <h2><span class="live-dot" id="live-dot" style="display: none;"></span>On Air</h2>
         <div class="np-main">
           <img id="np-art" class="art art-lg" alt="" style="display: none;" />
           <div class="np-info">
@@ -52,12 +52,20 @@
     </div>
 
     <div>
-      <div class="panel">
-        <h2>Chat</h2>
-        <ul id="chat-log"></ul>
-        <div class="row">
-          <input id="chat-input" placeholder="Say something..." maxlength="500" />
-          <button id="chat-send">Send</button>
+      <div class="panel" id="profile-panel">
+        <h2>Profile</h2>
+        <div id="profile-display" class="profile-display">
+          <span id="profile-avatar" class="profile-avatar"></span>
+          <span id="profile-name"></span>
+          <button id="profile-edit-btn" type="button" class="icon-btn" title="Change name/avatar"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z" /></svg></button>
+        </div>
+        <div id="profile-edit-form" style="display: none;">
+          <div class="avatar-grid" id="profile-avatar-grid"></div>
+          <input id="profile-name-input" placeholder="Your name" maxlength="30" />
+          <div class="row">
+            <button id="profile-save-btn" type="button">Save</button>
+            <button id="profile-cancel-btn" type="button" class="icon-btn">Cancel</button>
+          </div>
         </div>
       </div>
 
@@ -72,6 +80,15 @@
       <div class="panel">
         <h2>Listeners</h2>
         <div id="listeners"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Chat</h2>
+        <ul id="chat-log"></ul>
+        <div class="row">
+          <input id="chat-input" placeholder="Say something..." maxlength="500" />
+          <button id="chat-send">Send</button>
+        </div>
       </div>
 
       <div class="panel">

@@ -131,9 +131,10 @@ async def ws_endpoint(websocket: WebSocket):
                     return
                 user_id = (msg.get("client_id") or "").strip()[:64] or str(uuid.uuid4())
                 name = (msg.get("name") or "Anonymous").strip()[:30] or "Anonymous"
+                avatar = (msg.get("avatar") or "🙂").strip()[:8] or "🙂"
                 active_sockets[user_id] = websocket
                 await websocket.send_json({"type": "you", "id": user_id})
-                await room.add_user(User(id=user_id, name=name))
+                await room.add_user(User(id=user_id, name=name, avatar=avatar))
                 joined = True
                 logger.info("%s joined", name)
                 continue

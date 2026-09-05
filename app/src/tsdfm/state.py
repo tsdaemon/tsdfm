@@ -13,6 +13,10 @@ SETTLE_SECONDS = 3
 POLL_INTERVAL = 2
 DONE_THRESHOLD = 1.5
 MAX_TRACK_SAFETY_SECONDS = 20 * 60
+# How long to wait for a pushed request to actually go on air before giving up and
+# falling back to plain remaining() polling.
+START_POLL_INTERVAL = 0.5
+MAX_START_WAIT = 60
 
 
 @dataclass
@@ -28,6 +32,7 @@ class Track:
 class User:
     id: str
     name: str
+    avatar: str = "🙂"
 
 
 class Room:
@@ -56,13 +61,14 @@ class Room:
     def snapshot(self) -> dict:
         return {
             "type": "state",
-            "users": [{"id": u.id, "name": u.name} for u in self.users.values()],
+            "users": [{"id": u.id, "name": u.name, "avatar": u.avatar} for u in self.users.values()],
             "dj_order": [
                 {
                     "id": uid,
                     "name": self.users[uid].name,
+                    "avatar": self.users[uid].avatar,
                     "queue": [
-                        {"title": t.title, "artist": t.artist}
+                        {"title": t.title, "artist": t.artist, "art_url": t.art_url}
                         for t in self.dj_queues.get(uid, [])
                     ],
                 }
@@ -150,7 +156,7 @@ class Room:
         stream_url = self.navidrome.stream_url(track.navidrome_id)
         dj_name = self.users[dj_id].name if dj_id in self.users else "?"
         logger.info("Now playing %r by %s (DJ: %s)", track.title, track.artist, dj_name)
-        await self.liquidsoap.push(stream_url)
+        rid = await self.liquidsoap.push(stream_url)
         self.now_playing = {
             "title": track.title,
             "artist": track.artist,
@@ -168,14 +174,25 @@ class Room:
         current = asyncio.current_task()
         if self._advance_task and self._advance_task is not current:
             self._advance_task.cancel()
-        self._advance_task = asyncio.create_task(self._advance_after())
+        self._advance_task = asyncio.create_task(self._advance_after(rid))
 
-    async def _advance_after(self):
-        # Advance timing comes entirely from liquidsoap's own remaining() countdown,
-        # not from Navidrome's (possibly wrong) reported duration - so a mistagged
-        # file can no longer cause an early cutoff. MAX_TRACK_SAFETY_SECONDS is a
-        # generous, duration-independent backstop for a sustained liquidsoap outage.
+    async def _advance_after(self, rid: Optional[str] = None):
+        # Advance timing comes entirely from liquidsoap's own countdown, not from
+        # Navidrome's (possibly wrong) reported duration - so a mistagged file can't
+        # cause an early cutoff. MAX_TRACK_SAFETY_SECONDS is a generous,
+        # duration-independent backstop for a sustained liquidsoap outage.
         try:
+            # remaining() reports whatever liquidsoap is outputting *right now*, which
+            # just after a push is still the previous track's tail or the 5s blank
+            # filler. Wait for this specific request to leave the pending queue - that
+            # is the moment it actually goes on air - or we advance again immediately
+            # and end up running a whole track ahead of the audio.
+            if rid is not None:
+                start_deadline = time.time() + MAX_START_WAIT
+                while time.time() < start_deadline:
+                    if rid not in await self.liquidsoap.pending_rids():
+                        break
+                    await asyncio.sleep(START_POLL_INTERVAL)
             await asyncio.sleep(SETTLE_SECONDS)
         except asyncio.CancelledError:
             return
@@ -231,8 +248,10 @@ class Room:
             await self.broadcast(self.snapshot())
 
     async def chat(self, user_id: str, text: str):
-        name = self.users[user_id].name if user_id in self.users else "?"
-        msg = {"type": "chat", "user": name, "text": text[:500], "ts": time.time()}
+        user = self.users.get(user_id)
+        name = user.name if user else "?"
+        avatar = user.avatar if user else "🙂"
+        msg = {"type": "chat", "user": name, "avatar": avatar, "text": text[:500], "ts": time.time()}
         self.chat_history.append(msg)
         self.chat_history = self.chat_history[-50:]
         await self.broadcast(msg)

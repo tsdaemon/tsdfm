@@ -35,8 +35,20 @@ class LiquidsoapControl:
             writer.write(b"quit\n")
             writer.close()
 
-    async def push(self, uri: str) -> None:
-        await self._send(f"{self.queue_id}.push {uri}")
+    async def push(self, uri: str) -> Optional[str]:
+        """Queues a track and returns liquidsoap's request id, which is how we later
+        tell whether *this* track has started playing (see pending_rids)."""
+        raw = await self._send(f"{self.queue_id}.push {uri}")
+        rid = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+        return rid if rid.isdigit() else None
+
+    async def pending_rids(self) -> list[str]:
+        """Request ids queued but NOT yet playing. A pushed track leaving this list is
+        the moment it actually goes on air - `remaining()` alone can't tell us that,
+        because it reports whatever is currently output (possibly the blank filler)."""
+        raw = await self._send(f"{self.queue_id}.queue")
+        first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+        return [tok for tok in first.split() if tok.isdigit()]
 
     async def skip(self) -> None:
         await self._send(f"{self.queue_id}.skip")

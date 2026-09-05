@@ -24,6 +24,13 @@ const appEl = document.getElementById("app");
 const INVITE_KEY = "tsdfm_invite";
 const CLIENT_ID_KEY = "tsdfm_client_id";
 const NAME_KEY = "tsdfm_name";
+const AVATAR_KEY = "tsdfm_avatar";
+
+const AVATAR_EMOJI = [
+  "😀", "😎", "🤠", "🥳", "🤖", "👽", "🐶", "🐱",
+  "🦊", "🐼", "🐵", "🦁", "🐸", "🐙", "🦄", "🐧",
+  "🍕", "🎧", "🎸", "⚡", "🔥", "🌟", "👑", "💀",
+];
 
 function renderJoinBox(innerHtml) {
   joinBox.innerHTML = `<strong>tsdfm</strong>${innerHtml}`;
@@ -51,23 +58,42 @@ function getClientId() {
 
 const myInvite = resolveInvite();
 const myClientId = getClientId();
+let myName = localStorage.getItem(NAME_KEY) || "";
+let myAvatar = localStorage.getItem(AVATAR_KEY) || "";
 
 if (!myInvite) {
   renderJoinBox('<p id="join-message">You need an invite link to join - ask the host for one.</p>');
+} else if (myName) {
+  connect();
 } else {
-  const savedName = localStorage.getItem(NAME_KEY);
-  if (savedName) {
-    connect(myInvite, myClientId, savedName);
-  } else {
-    showNamePrompt();
-  }
+  showNamePrompt();
 }
+
+function avatarGridHtml(selected) {
+  return AVATAR_EMOJI.map(
+    (emoji) => `<button type="button" class="avatar-choice${emoji === selected ? " selected" : ""}" data-emoji="${emoji}">${emoji}</button>`
+  ).join("");
+}
+
+function wireAvatarGrid(container, onSelect) {
+  container.querySelectorAll(".avatar-choice").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      container.querySelectorAll(".avatar-choice").forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      onSelect(btn.dataset.emoji);
+    });
+  });
+}
+
+let selectedAvatar = AVATAR_EMOJI[Math.floor(Math.random() * AVATAR_EMOJI.length)];
 
 function showNamePrompt() {
   renderJoinBox(`
+    <div class="avatar-grid" id="join-avatar-grid">${avatarGridHtml(selectedAvatar)}</div>
     <input id="name-input" placeholder="Your name" maxlength="30" />
     <button id="name-submit" type="button">Join</button>
   `);
+  wireAvatarGrid(document.getElementById("join-avatar-grid"), (emoji) => { selectedAvatar = emoji; });
   document.getElementById("name-submit").addEventListener("click", submitName);
   document.getElementById("name-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitName();
@@ -77,17 +103,63 @@ function showNamePrompt() {
 function submitName() {
   const name = document.getElementById("name-input").value.trim();
   if (!name) return;
-  localStorage.setItem(NAME_KEY, name);
+  myName = name;
+  myAvatar = selectedAvatar;
+  localStorage.setItem(NAME_KEY, myName);
+  localStorage.setItem(AVATAR_KEY, myAvatar);
   tryAutoplay();
-  connect(myInvite, myClientId, name);
+  connect();
 }
 
-function connect(invite, clientId, name) {
+function renderProfile() {
+  document.getElementById("profile-avatar").textContent = myAvatar || "🙂";
+  document.getElementById("profile-name").textContent = myName;
+}
+
+function showProfileEdit() {
+  document.getElementById("profile-display").style.display = "none";
+  const form = document.getElementById("profile-edit-form");
+  form.style.display = "flex";
+
+  let editAvatar = myAvatar;
+  const grid = document.getElementById("profile-avatar-grid");
+  grid.innerHTML = avatarGridHtml(editAvatar);
+  wireAvatarGrid(grid, (emoji) => { editAvatar = emoji; });
+
+  const nameInput = document.getElementById("profile-name-input");
+  nameInput.value = myName;
+
+  document.getElementById("profile-save-btn").onclick = () => {
+    const name = nameInput.value.trim();
+    if (!name) return;
+    myName = name;
+    myAvatar = editAvatar;
+    localStorage.setItem(NAME_KEY, myName);
+    localStorage.setItem(AVATAR_KEY, myAvatar);
+    // Already connected - push the update over the live socket instead of
+    // reconnecting. The server treats a re-join with the same client_id as
+    // an update, not a fresh join.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "join", invite: myInvite, client_id: myClientId, name: myName, avatar: myAvatar }));
+    }
+    renderProfile();
+    form.style.display = "none";
+    document.getElementById("profile-display").style.display = "flex";
+  };
+  document.getElementById("profile-cancel-btn").onclick = () => {
+    form.style.display = "none";
+    document.getElementById("profile-display").style.display = "flex";
+  };
+}
+
+document.getElementById("profile-edit-btn").addEventListener("click", showProfileEdit);
+
+function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
 
   ws.addEventListener("open", () => {
-    ws.send(JSON.stringify({ type: "join", invite, client_id: clientId, name }));
+    ws.send(JSON.stringify({ type: "join", invite: myInvite, client_id: myClientId, name: myName, avatar: myAvatar }));
   });
 
   ws.addEventListener("message", (event) => {
@@ -109,7 +181,7 @@ function connect(invite, clientId, name) {
     appEl.classList.remove("visible");
     renderJoinBox('<p id="join-message">Disconnected - reconnecting...</p>');
     joinOverlay.style.display = "flex";
-    setTimeout(() => connect(invite, clientId, name), 2000);
+    setTimeout(connect, 2000);
   });
 }
 
@@ -119,6 +191,7 @@ function handleState(state) {
     appEl.classList.add("visible");
   }
 
+  renderProfile();
   renderNowPlaying(state.now_playing);
   renderDjList(state.dj_order);
   renderListeners(state.users);
@@ -158,22 +231,45 @@ function renderNowPlaying(np) {
   const title = document.getElementById("np-title");
   const meta = document.getElementById("np-meta");
   const art = document.getElementById("np-art");
+  const liveDot = document.getElementById("live-dot");
   currentNowPlaying = np;
   if (!np) {
     title.textContent = "Nothing playing";
     meta.textContent = "Step up to DJ and queue a track to get things started.";
     art.style.display = "none";
+    liveDot.style.display = "none";
     updatePosition();
     return;
   }
   title.textContent = np.title;
   meta.textContent = `${np.artist} — spun by ${np.dj_name}`;
   art.style.display = "block";
+  liveDot.style.display = "inline-block";
   setArt(art, np.art_url);
   updatePosition();
 }
 
 let latestDjOrder = [];
+
+function trackRow(track) {
+  const li = document.createElement("li");
+  const img = document.createElement("img");
+  img.className = "art art-sm";
+  img.alt = "";
+  setArt(img, track.art_url);
+  li.appendChild(img);
+  const label = document.createElement("span");
+  label.textContent = `${track.artist} – ${track.title}`;
+  li.appendChild(label);
+  return li;
+}
+
+// State is fully re-rendered on every "state" message (which fires on lots of
+// unrelated events - a vote, someone else joining, etc.), not just when a track
+// is added. Tracking previous lengths lets us animate only genuinely new rows
+// (appended past the old length) instead of replaying the entrance for everything.
+let prevDjQueueLengths = {};
+let prevMyQueueLength = 0;
 
 function renderDjList(djOrder) {
   latestDjOrder = djOrder;
@@ -181,17 +277,40 @@ function renderDjList(djOrder) {
   list.innerHTML = "";
   isDj = djOrder.some((d) => d.id === myId);
 
+  if (djOrder.length === 0) {
+    list.innerHTML = '<li class="meta">No one has stepped up to DJ yet.</li>';
+  }
+
+  const newLengths = {};
   for (const dj of djOrder) {
     const li = document.createElement("li");
-    let queueText = "— empty";
-    if (dj.queue.length === 1) {
-      queueText = `🎵 ${dj.queue[0].title} — ${dj.queue[0].artist}`;
-    } else if (dj.queue.length > 1) {
-      queueText = `🎵 ${dj.queue[0].title} — ${dj.queue[0].artist} (+${dj.queue.length - 1} more)`;
+    li.className = "dj-entry";
+
+    const header = document.createElement("div");
+    header.className = "dj-name";
+    header.textContent = `${dj.avatar} ${dj.name}`;
+    li.appendChild(header);
+
+    if (dj.queue.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "meta";
+      empty.textContent = "— empty";
+      li.appendChild(empty);
+    } else {
+      const prevLen = prevDjQueueLengths[dj.id] || 0;
+      const trackList = document.createElement("ul");
+      trackList.className = "dj-track-list";
+      dj.queue.forEach((track, index) => {
+        const row = trackRow(track);
+        if (index >= prevLen) row.classList.add("enter");
+        trackList.appendChild(row);
+      });
+      li.appendChild(trackList);
     }
-    li.textContent = `${dj.name}: ${queueText}`;
+    newLengths[dj.id] = dj.queue.length;
     list.appendChild(li);
   }
+  prevDjQueueLengths = newLengths;
 
   const toggleBtn = document.getElementById("dj-toggle");
   toggleBtn.textContent = isDj ? "Step down" : "Step up to DJ";
@@ -210,12 +329,12 @@ function renderMyQueue() {
   const queue = getMyQueue();
   if (queue.length === 0) {
     list.innerHTML = '<li class="meta">Nothing queued yet - search above and click a track to add it.</li>';
+    prevMyQueueLength = 0;
     return;
   }
   queue.forEach((track, index) => {
-    const li = document.createElement("li");
-    const label = document.createElement("span");
-    label.textContent = `${index + 1}. ${track.title} — ${track.artist}`;
+    const li = trackRow(track);
+    if (index >= prevMyQueueLength) li.classList.add("enter");
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "icon-btn";
@@ -223,14 +342,15 @@ function renderMyQueue() {
     removeBtn.addEventListener("click", () => {
       ws.send(JSON.stringify({ type: "remove_track", index }));
     });
-    li.appendChild(label);
     li.appendChild(removeBtn);
     list.appendChild(li);
   });
+  prevMyQueueLength = queue.length;
 }
 
 function renderListeners(users) {
-  document.getElementById("listeners").textContent = users.map((u) => u.name).join(", ") || "Just you.";
+  document.getElementById("listeners").textContent =
+    users.map((u) => `${u.avatar} ${u.name}`).join(", ") || "Just you.";
 }
 
 function renderChatHistory(history) {
@@ -242,7 +362,9 @@ function renderChatHistory(history) {
 function appendChat(msg) {
   const log = document.getElementById("chat-log");
   const li = document.createElement("li");
-  li.innerHTML = `<span class="user">${escapeHtml(msg.user)}</span>${escapeHtml(msg.text)}`;
+  li.className = "enter";
+  const avatar = msg.avatar ? `${msg.avatar} ` : "";
+  li.innerHTML = `<span class="user">${avatar}${escapeHtml(msg.user)}</span>${escapeHtml(msg.text)}`;
   log.appendChild(li);
   log.scrollTop = log.scrollHeight;
 }
@@ -250,7 +372,7 @@ function appendChat(msg) {
 function appendLog(entry) {
   const panel = document.getElementById("log-panel");
   const li = document.createElement("li");
-  li.className = `level-${entry.level}`;
+  li.className = `level-${entry.level} enter`;
   const time = new Date(entry.ts * 1000).toLocaleTimeString();
   li.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(entry.message)}`;
   panel.appendChild(li);
@@ -377,15 +499,8 @@ async function runSearch() {
     return;
   }
   for (const track of results) {
-    const li = document.createElement("li");
-    const img = document.createElement("img");
-    img.className = "art art-sm";
-    img.alt = "";
-    setArt(img, track.art_url);
-    li.appendChild(img);
-    const label = document.createElement("span");
-    label.textContent = `${track.artist} – ${track.title}`;
-    li.appendChild(label);
+    const li = trackRow(track);
+    li.style.cursor = "pointer";
     li.addEventListener("click", () => {
       ws.send(JSON.stringify({ type: "queue_track", ...track }));
       statusEl.textContent = `Added "${track.title}" to your queue.`;

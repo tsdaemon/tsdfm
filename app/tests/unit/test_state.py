@@ -7,17 +7,39 @@ from tsdfm.state import Room, Track, User
 
 
 class FakeLiquidsoap:
-    """Stands in for the telnet control channel. `remaining_values` is consumed one
-    reading per poll, so a test can script exactly how a track winds down."""
+    """Stands in for the telnet control channel.
 
-    def __init__(self, remaining_values=None):
+    `remaining_values` is consumed one reading per poll, so a test can script exactly
+    how a track winds down. `polls_until_playing` models the real gap between pushing a
+    request and liquidsoap actually putting it on air - during which it sits in the
+    pending queue and remaining() still describes the *previous* audio.
+    """
+
+    def __init__(self, remaining_values=None, polls_until_playing=0):
         self.pushed = []
         self.skips = 0
         self.remaining_values = list(remaining_values or [])
         self.remaining_calls = 0
+        self.pending_polls = 0
+        self.polls_until_playing = polls_until_playing
+        self._pending = []
+        self._pending_left = 0
 
     async def push(self, uri):
         self.pushed.append(uri)
+        rid = str(len(self.pushed))
+        if self.polls_until_playing:
+            self._pending = [rid]
+            self._pending_left = self.polls_until_playing
+        return rid
+
+    async def pending_rids(self):
+        self.pending_polls += 1
+        if self._pending_left > 0:
+            self._pending_left -= 1
+            return list(self._pending)
+        self._pending = []
+        return []
 
     async def skip(self):
         self.skips += 1
@@ -306,7 +328,12 @@ async def test_snapshot_exposes_queue_contents():
     snap = room.snapshot()
 
     assert snap["dj_order"] == [
-        {"id": "u1", "name": "Ann", "queue": [{"title": "Next", "artist": "Someone"}]}
+        {
+            "id": "u1",
+            "name": "Ann",
+            "avatar": "🙂",
+            "queue": [{"title": "Next", "artist": "Someone", "art_url": None}],
+        }
     ]
     assert snap["now_playing"]["title"] == "OnAir"
     assert snap["skip_votes_needed"] == 1
