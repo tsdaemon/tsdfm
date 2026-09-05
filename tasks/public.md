@@ -1,5 +1,10 @@
 # Ledger: making tsdfm reachable by friends (public deploy)
 
+Update (2026-09-05): the unauthenticated-stream design below is superseded. Icecast
+now requires an invite-derived session cookie via an app authentication callback.
+Search, artwork, and logs require the same session. See docs/architecture.md for
+the current design; the remaining text is the historical deployment handoff.
+
 Handoff doc for whoever picks this up next. Written mid-stream — this is config work,
 **nothing here has been run against the real NAS yet.**
 

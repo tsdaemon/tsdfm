@@ -418,7 +418,8 @@ function send(message) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
 
-function connect() {
+async function connect() {
+  if (!(await establishSession())) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
 
@@ -651,14 +652,40 @@ $("profile-cancel-btn").addEventListener("click", () => setState({ editingProfil
 
 // ------------------------------------------------------------------- bootstrap
 
-startPlayback();
-loadLogHistory();
-
-if (!invite) {
-  setState({ phase: "need-invite" });
-} else if (!state.me.name) {
-  setState({ phase: "naming" });
-} else {
-  setState({ phase: "connecting" });
-  connect();
+async function establishSession() {
+  if (!invite) {
+    setState({ phase: "need-invite" });
+    return false;
+  }
+  try {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ invite }),
+    });
+    if (response.status === 401) {
+      setState({ phase: "need-invite" });
+      return false;
+    }
+    if (!response.ok) throw new Error("Session unavailable");
+    return true;
+  } catch {
+    setState({ phase: "disconnected" });
+    setTimeout(bootstrap, 2000);
+    return false;
+  }
 }
+
+async function bootstrap() {
+  if (!(await establishSession())) return;
+  startPlayback();
+  loadLogHistory();
+  if (!state.me.name) {
+    setState({ phase: "naming" });
+  } else {
+    setState({ phase: "connecting" });
+    connect();
+  }
+}
+
+bootstrap();

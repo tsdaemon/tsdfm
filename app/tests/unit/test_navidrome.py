@@ -78,7 +78,7 @@ async def test_search_parses_songs(client):
     assert song["id"] == "s1"
     assert song["title"] == "Track One"
     assert song["duration"] == 187
-    assert song["art_url"].startswith(f"{BASE}/rest/getCoverArt")
+    assert song["art_url"] == "/api/cover-art?id=art-1&size=300"
 
 
 @respx.mock
@@ -141,3 +141,32 @@ async def test_search_surfaces_subsonic_error(client):
 
     with pytest.raises(RuntimeError, match="Wrong username or password"):
         await client.search("anything")
+
+
+@respx.mock
+async def test_cover_art_fetches_image_with_server_credentials(client):
+    route = respx.get(f"{BASE}/rest/getCoverArt").mock(
+        return_value=httpx.Response(200, content=b"image bytes", headers={"Content-Type": "image/jpeg"})
+    )
+    assert await client.cover_art("art/&1") == (b"image bytes", "image/jpeg")
+    params = route.calls.last.request.url.params
+    assert params["id"] == "art/&1"
+    assert params["u"] == "dj"
+    assert "t" in params
+
+
+@respx.mock
+@pytest.mark.parametrize("status,media_type", [(500, "text/plain"), (200, "application/json"), (200, "text/html")])
+async def test_cover_art_rejects_upstream_errors(client, status, media_type):
+    respx.get(f"{BASE}/rest/getCoverArt").mock(
+        return_value=httpx.Response(status, content=b"error", headers={"Content-Type": media_type})
+    )
+    with pytest.raises(RuntimeError, match="^Cover art unavailable$"):
+        await client.cover_art("art-1")
+
+
+def test_legacy_track_art_is_rewritten():
+    from tsdfm.state import Track
+    track = Track("song", "title", "artist", 180,
+                  BASE + "/rest/getCoverArt?id=art%2F1&u=dj&t=secret&s=salt")
+    assert track.art_url == "/api/cover-art?id=art%2F1"

@@ -9,6 +9,9 @@ services:
       ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD}
       ICECAST_HOSTNAME: ${ICECAST_HOSTNAME}
       ICECAST_PORT: ${ICECAST_PORT:-6491}
+      ICECAST_AUTH_URL: http://host.docker.internal:8080/api/stream-auth
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   liquidsoap:

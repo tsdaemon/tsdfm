@@ -7,16 +7,18 @@ import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from tsdfm.liquidsoap_control import LiquidsoapControl
 from tsdfm.navidrome import NavidromeClient
 from tsdfm.state import Room, Track, User
+from tsdfm.auth import COOKIE, MAX_AGE, issue_session, valid_session, session_from_cookie
 
 # Only fills gaps in os.environ, so docker-compose's own environment values always win.
 load_dotenv(find_dotenv(usecwd=True))
@@ -25,6 +27,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("app")
+# HTTPX's info logs include authenticated Navidrome URLs and are broadcast to clients.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 log_buffer: deque[dict] = deque(maxlen=200)
 
@@ -61,6 +65,7 @@ INVITE_TOKEN = os.environ.get("INVITE_TOKEN") or None
 if not INVITE_TOKEN:
     raise RuntimeError("INVITE_TOKEN is not set - run `task invite` to generate one")
 STATE_PATH = Path(os.environ.get("STATE_PATH", Path.cwd() / "room-state.json"))
+STATS_API_TOKEN = os.environ.get("STATS_API_TOKEN", "")
 
 
 @asynccontextmanager
@@ -81,6 +86,61 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def protect_api(request: Request, call_next):
+    if request.url.path == "/api/stats":
+        authorization = request.headers.get("authorization", "")
+        if not STATS_API_TOKEN or not secrets.compare_digest(
+            authorization.encode(), f"Bearer {STATS_API_TOKEN}".encode()
+        ):
+            return JSONResponse({"error": "Stats API token required"}, status_code=401,
+                                headers={"Cache-Control": "no-store"})
+    if request.url.path.startswith("/api/") and request.url.path not in {
+        "/api/session", "/api/stream-auth", "/api/stats",
+    }:
+        if not valid_session(request.cookies.get(COOKIE), INVITE_TOKEN):
+            return JSONResponse({"error": "Invite required"}, status_code=401,
+                                headers={"Cache-Control": "no-store"})
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") and request.url.path != "/api/cover-art":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/session")
+async def create_session(request: Request):
+    try:
+        body = await request.json()
+    except ValueError:
+        return Response(status_code=400)
+    if not isinstance(body, dict) or not secrets.compare_digest(
+        str(body.get("invite", "")).encode(), INVITE_TOKEN.encode()
+    ):
+        return Response(status_code=401)
+    response = Response(status_code=204)
+    response.set_cookie(COOKIE, issue_session(INVITE_TOKEN), max_age=MAX_AGE,
+                        httponly=True, samesite="lax", path="/",
+                        secure=request.url.scheme == "https" or ICECAST_STREAM_URL.startswith("https://"))
+    return response
+
+
+@app.post("/api/stream-auth")
+async def stream_auth(request: Request):
+    # Icecast posts the original Cookie header as a form field. No audio passes here.
+    body = await request.body()
+    if len(body) > 16384:
+        return Response(status_code=403)
+    fields = parse_qs(body.decode("utf-8", errors="replace"))
+    cookie = fields.get("ClientHeader.cookie", [""])[0]
+    if (fields.get("action") == ["listener_add"]
+            and fields.get("mount", [""])[0].split("?", 1)[0] == "/radio.mp3"
+            and valid_session(session_from_cookie(cookie), INVITE_TOKEN)):
+        return Response(headers={"icecast-auth-user": "1"})
+    return Response(status_code=403)
+
+
 templates = Jinja2Templates(directory=str(STATIC_DIR))
 
 navidrome = NavidromeClient(NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWORD)
@@ -131,6 +191,18 @@ async def search(q: str):
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
+@app.get("/api/cover-art")
+async def cover_art(id: str = Query(min_length=1, max_length=512), size: int = Query(default=300, ge=1, le=1000)):
+    try:
+        content, media_type = await navidrome.cover_art(id, size)
+    except RuntimeError:
+        return Response(status_code=502)
+    return Response(content, media_type=media_type, headers={
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
 @app.get("/api/logs")
 async def get_logs():
     return list(log_buffer)
@@ -138,9 +210,8 @@ async def get_logs():
 
 @app.get("/api/stats")
 async def stats():
-    # Unauthenticated on purpose - a listener count isn't sensitive, and this is
-    # what the homepage dashboard widget polls (see docker-compose.deploy.yml).
-    return {"listeners": len(active_sockets)}
+    # Keep the old field for existing consumers; these are connected room users.
+    return {"connectedusers": len(active_sockets), "listeners": len(active_sockets)}
 
 
 @app.websocket("/ws")

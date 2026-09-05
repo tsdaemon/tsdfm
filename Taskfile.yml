@@ -62,6 +62,13 @@ tasks:
     cmds:
       - PYTHONPATH= uv run pytest tests/e2e -q -m e2e
 
+  test:auth:
+    desc: Test listener authentication in isolated local containers (requires built tsdfm images)
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - PYTHONPATH= uv run python tests/integration/check_stream_auth.py
+
   test:all:
     desc: Run unit and e2e tests
     deps: [sync]
@@ -91,6 +98,25 @@ tasks:
     dotenv: ['.env.deploy']
     cmds:
       - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml down
+
+  deploy:auth:
+    desc: Build and apply app/Icecast access control on the NAS (disconnects listeners)
+    dotenv: ['.env.deploy']
+    cmds:
+      - task: deploy:auth:build
+      - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml up -d --no-deps app icecast
+
+  deploy:auth:build:
+    desc: Build app and Icecast on the NAS without restarting services
+    dotenv: ['.env.deploy']
+    cmds:
+      - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml build app icecast
+
+  deploy:auth:verify:
+    desc: Read-only public authentication and audio check using the deploy invite
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - PYTHONPATH= uv run python scripts/verify_deploy_auth.py
 
   deploy:logs:
     desc: Tail logs from the remote NAS deployment

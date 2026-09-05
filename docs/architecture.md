@@ -44,6 +44,11 @@ flowchart LR
 Solid arrows carry audio; dotted arrows carry control. Note the app has **no** solid
 arrow — a useful sanity check when reasoning about a change.
 
+Cover images are fetched separately through the app's `/api/cover-art?id=...` endpoint.
+The app authenticates to Navidrome and returns the image with a one-hour private browser
+cache. Browsers receive same-origin artwork URLs, never Navidrome credentials or LAN
+addresses. Legacy artwork URLs in saved queues are converted when restored.
+
 ## Components
 
 | Piece | Role | Port |
@@ -365,14 +370,33 @@ of what's published. `ICECAST_PORT` also has to reach Liquidsoap (it connects to
 `icecast:$ICECAST_PORT` internally) and Icecast's own `<listen-socket>`, so changing it
 means setting the one env var, not editing three places by hand.
 
-**Why Icecast keeps a published port instead of also going through Traefik.** The audio
-stream is a long-lived connection and was already unauthenticated by design (the invite
-token gates the *room*, not the raw MP3 URL) — routing it through a reverse proxy wouldn't
-add real access control, just another hop.
+**Stream access is authenticated at Icecast.** The browser exchanges its invite via
+`POST /api/session` for a signed HttpOnly cookie, valid for seven days and tied to the
+current invite secret. `/api/search`, `/api/cover-art`, and `/api/logs` require that cookie.
+`/api/stats` requires a separate `STATS_API_TOKEN` bearer token, scoped only to
+that endpoint. Homepage sends it using its configured Authorization header. An unset
+token denies access; neither an invite nor a browser session substitutes for this token. The frontend establishes a session before
+requesting audio or private APIs.
+
+For every new `/radio.mp3` listener, Icecast posts the Cookie header to the app's
+`/api/stream-auth` endpoint. Missing, expired, or forged sessions are denied. If the app
+is unavailable, new listeners are denied; existing connections keep playing. Audio
+still travels directly from Icecast to browsers. Rotating the invite invalidates sessions
+on subsequent requests; already connected streams require disconnection to revoke.
+
+The stream and app must use the same browser hostname for the cookie to reach both.
+Public deploy uses HTTPS and `/radio.mp3` on the app's hostname. For local development,
+use the same hostname for port 8080 and port 6491 (for example localhost for both).
+Icecast reaches the host app via `host.docker.internal:8080` in dev, and `app:APP_PORT`
+in deploy. Do not expose another unauthenticated mount or relay.
+
+`task test:auth` checks real Icecast/Liquidsoap in isolated local containers with test
+credentials, including rejection when the authentication service is down. `task deploy:auth`
+builds and recreates only app and Icecast, disconnecting existing listeners.
 
 **The Homepage dashboard widget** (`homepage.widget.*` labels on `app`) polls
-`GET /api/stats` over the LAN-local Traefik route — deliberately unauthenticated, since a
-listener count isn't sensitive, and Homepage itself lives on the LAN anyway.
+`GET /api/stats` over the LAN-local Traefik route — authenticated with the dedicated stats token. Its `connectedusers` field counts
+connected room users; `listeners` is retained as a compatibility alias.
 
 ## Configuration
 

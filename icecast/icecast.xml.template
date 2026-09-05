@@ -28,6 +28,16 @@
 
     <fileserve>1</fileserve>
 
+    <mount>
+        <mount-name>/radio.mp3</mount-name>
+        <authentication type="url">
+            <option name="listener_add" value="${ICECAST_AUTH_URL}"/>
+            <option name="headers" value="cookie"/>
+            <option name="header_prefix" value="ClientHeader."/>
+            <option name="auth_header" value="icecast-auth-user: 1"/>
+        </authentication>
+    </mount>
+
     <paths>
         <basedir>/usr/share/icecast2</basedir>
         <logdir>/var/log/icecast2</logdir>

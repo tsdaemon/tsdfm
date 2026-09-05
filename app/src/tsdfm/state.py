@@ -7,6 +7,7 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from tsdfm.liquidsoap_control import LiquidsoapUnavailable
+from tsdfm.navidrome import local_art_url
 from tsdfm.persistence import load_state, save_state
 
 logger = logging.getLogger("room")
@@ -33,6 +34,9 @@ class Track:
     artist: str
     duration: int
     art_url: Optional[str] = None
+
+    def __post_init__(self):
+        self.art_url = local_art_url(self.art_url)
 
 
 @dataclass
@@ -366,6 +370,7 @@ class Room:
         if saved_rid and saved_record and await self.liquidsoap.request_metadata(saved_rid):
             self.current_rid = saved_rid
             self.current_record = saved_record
+            self.current_record["art_url"] = local_art_url(saved_record.get("art_url"))
             logger.info("Re-attached to %r already on air", saved_record.get("title"))
 
         await self._sync_once()

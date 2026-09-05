@@ -1,4 +1,8 @@
 services:
+  icecast:
+    environment:
+      ICECAST_AUTH_URL: http://app:${APP_PORT:-6490}/api/stream-auth
+
   app:
     build: ./app
     depends_on:
@@ -14,6 +18,7 @@ services:
       # deployed room's invite link can never silently fall back to (or share)
       # your local test room's token - see docs/architecture.md.
       INVITE_TOKEN: ${DEPLOY_INVITE_TOKEN}
+      STATS_API_TOKEN: ${STATS_API_TOKEN:-}
       # Named volume, deliberately not a host path - matches the local-dev
       # rule of keeping every writer on its own STATE_PATH.
       STATE_PATH: /data/room-state.json
@@ -41,13 +46,14 @@ services:
       # no extra port or network wiring is needed.
       homepage.group: Applications
       homepage.name: tsdfm
-      homepage.icon: "http://${APP_HOSTNAME_LOCAL}/static/icon/android-chrome-192x192.png"
-      homepage.href: "http://${APP_HOSTNAME_LOCAL}"
+      homepage.icon: "http://${APP_PUBLIC_URL}/static/icon/android-chrome-192x192.png"
+      homepage.href: "http://${APP_PUBLIC_URL}"
       homepage.description: Turntable.fm-style radio for friends
       homepage.widget.type: customapi
       homepage.widget.url: "http://${APP_HOSTNAME_LOCAL}/api/stats"
-      homepage.widget.mappings[0].field: listeners
-      homepage.widget.mappings[0].label: Listeners
+      homepage.widget.headers.Authorization: "Bearer ${STATS_API_TOKEN:-}"
+      homepage.widget.mappings[0].field: connectedusers
+      homepage.widget.mappings[0].label: Connected users
       homepage.widget.mappings[0].format: number
 
   liquidsoap:
