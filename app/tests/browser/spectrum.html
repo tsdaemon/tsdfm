@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Audio spectrum browser checks</title>
+<audio id="audio"></audio>
+<script src="/static/audio-spectrum.js"></script>
+<script>
+async function runChecks() {
+  const audio = document.getElementById('audio');
+  const context = new AudioContext();
+  const tone = context.createOscillator();
+  const gain = context.createGain();
+  const output = context.createMediaStreamDestination();
+  tone.frequency.value = 120;
+  gain.gain.value = 0.2;
+  tone.connect(gain).connect(output);
+  audio.srcObject = output.stream;
+  let latest = {levels: [], energy: 0};
+  let count = 0;
+  const spectrum = createAudioSpectrum(audio, sample => { latest = sample; count++; });
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const assert = (test, message) => { if (!test) throw Error(message); };
+  const peak = () => latest.levels.indexOf(Math.max(...latest.levels));
+  const quiet = () => latest.levels.every(value => value === 0) && latest.energy === 0;
+  await context.resume();
+  tone.start();
+  await audio.play();
+  spectrum.setEnabled(true);
+  await wait(800);
+  assert(latest.energy > 0.1, 'Real audio energy must reach the analyser');
+  assert(peak() < 8, 'A bass tone must move the low bands');
+  const lowPeak = peak();
+  tone.frequency.value = 4000;
+  await wait(600);
+  assert(peak() > 13 && peak() > lowPeak, 'A treble tone must move the high bands: '+JSON.stringify(latest.levels));
+  gain.gain.value = 0;
+  await wait(700);
+  assert(latest.energy < 0.001, 'Silence must have no floor pulse');
+  assert(Math.max(...latest.levels) < 0.02, 'Silence must settle all frequency bands');
+  gain.gain.value = 0.2;
+  audio.muted = true;
+  await wait(100);
+  assert(quiet(), 'Muting must clear the visualizer');
+  const mutedCount = count;
+  await wait(100);
+  assert(count === mutedCount, 'Muted audio must not keep sampling');
+  audio.muted = false;
+  await wait(500);
+  assert(latest.energy > 0.1, 'Unmuting must resume measured animation');
+  spectrum.setEnabled(false);
+  assert(quiet(), 'Leaving the scene must clear the spectrum');
+  assert(!audio.paused && !audio.muted && audio.srcObject === output.stream,
+    'Analysis must never pause, mute, or replace playback');
+  spectrum.setEnabled(true);
+  audio.pause();
+  await wait(100);
+  assert(quiet(), 'Paused audio must clear the spectrum');
+  // Simulate the live-edge reload used by the app, with a new captured track.
+  const nextOutput = context.createMediaStreamDestination();
+  gain.connect(nextOutput);
+  audio.srcObject = null;
+  audio.load();
+  audio.srcObject = nextOutput.stream;
+  await audio.play();
+  await wait(600);
+  assert(latest.energy > 0.1, 'A replaced media stream must be reattached');
+  spectrum.setEnabled(false);
+  audio.pause();
+  tone.stop();
+  await context.close();
+  return 'PASS: bass, treble, silence, mute, pause, resume, reload, and independent playback';
+}
+</script>

@@ -62,6 +62,13 @@ tasks:
     cmds:
       - PYTHONPATH= uv run pytest tests/e2e -q -m e2e
 
+  test:spectrum:
+    desc: Check real browser audio analysis with generated tones (Chrome, no live services)
+    deps: [sync]
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - PYTHONPATH= uv run python tests/browser/check_spectrum.py
+
   test:auth:
     desc: Test listener authentication in isolated local containers (requires built tsdfm images)
     deps: [sync]

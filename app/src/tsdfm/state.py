@@ -9,6 +9,7 @@ from uuid import uuid4
 from tsdfm.liquidsoap_control import LiquidsoapUnavailable
 from tsdfm.navidrome import local_art_url
 from tsdfm.persistence import load_state, save_state
+from tsdfm.scene import BAR_SEATS, DRINKS, MOVES, choice, valid_bpm
 
 logger = logging.getLogger("room")
 
@@ -34,9 +35,11 @@ class Track:
     artist: str
     duration: int
     art_url: Optional[str] = None
+    bpm: Optional[float] = None
 
     def __post_init__(self):
         self.art_url = local_art_url(self.art_url)
+        self.bpm = valid_bpm(self.bpm)
 
 
 @dataclass
@@ -119,7 +122,8 @@ class Room:
     def snapshot(self) -> dict:
         return {
             "type": "state",
-            "users": [{"id": u.id, "name": u.name, "avatar": u.avatar} for u in self.users.values()],
+            "users": [{"id": u.id, "name": u.name, "avatar": u.avatar,
+                       "scene": choice(self.known.get(u.id, {}).get("scene"))} for u in self.users.values()],
             # Offline DJs stay listed: they keep their slot and queue across a
             # disconnect, so hiding them would misrepresent the rotation.
             "dj_order": [
@@ -181,8 +185,34 @@ class Room:
 
     async def add_user(self, user: User):
         self.users[user.id] = user
-        self.known[user.id] = {"name": user.name, "avatar": user.avatar}
+        social = choice(self.known.get(user.id, {}).get("scene"))
+        if social["move"] == "seated" and self._bar_full(user.id):
+            social["move"] = "hands"
+        self.known[user.id] = {"name": user.name, "avatar": user.avatar, "scene": social}
         await self._publish()
+
+    def _bar_full(self, user_id: str) -> bool:
+        return sum(
+            choice(self.known.get(uid, {}).get("scene"))["move"] == "seated"
+            for uid in self.users if uid != user_id
+        ) >= BAR_SEATS
+
+    async def set_scene(self, user_id: str, message: dict) -> Optional[str]:
+        if user_id not in self.users:
+            return "Join first"
+        current = choice(self.known.get(user_id, {}).get("scene"))
+        move = message.get("move", current["move"])
+        drink = message.get("drink", current["drink"])
+        if move not in MOVES or drink not in DRINKS:
+            return "Choose a dance move or a drink from the bar."
+        # An order can be collected standing when all stools are taken.
+        if "drink" in message and drink and "move" not in message:
+            move = "hands" if self._bar_full(user_id) else "seated"
+        if move == "seated" and self._bar_full(user_id):
+            return "The bar stools are full. You can still order a drink."
+        self.known[user_id]["scene"] = {"move": move, "drink": drink}
+        await self._publish()
+        return None
 
     async def remove_user(self, user_id: str):
         # Identity is stable (client-generated id persisted in the browser), so a
@@ -298,6 +328,7 @@ class Room:
                 "dj_name": self._name_of(dj_id),
                 "dj_id": dj_id,
                 "duration": track.duration,
+                "bpm": track.bpm,
             }
             logger.info("Cueing %r by %s (DJ: %s)", track.title, track.artist, self._name_of(dj_id))
 
@@ -322,6 +353,7 @@ class Room:
                 "artist": record.get("artist", "Unknown"),
                 "art_url": record.get("art_url"),
                 "duration": record.get("duration"),
+                "bpm": record.get("bpm"),
                 "dj_name": record.get("dj_name"),
                 "ts": time.time(),
             }

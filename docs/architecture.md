@@ -281,6 +281,43 @@ Play order for the above: `A1 → B1 → A2 → …`
 `current_dj_index` advances on each pick, so someone who queues mid-song slots into the
 rotation rather than jumping the line.
 
+## Dancefloor and bar
+
+The scene below On Air is a presentation component in `static/room-scene.js`,
+with `room-scene.css` scoped inside a shadow root. `app.js` supplies room state
+and action callbacks; the component has no sockets, audio processing, or playback
+decisions. It renders connected users with their profile avatars. Keyed character
+elements preserve animation across progress ticks and chat updates.
+
+Authenticated `scene` WebSocket messages select a move (headbang, jumping, disco,
+or seated) or order a drink. The server validates choices and stores them alongside
+known identities, so they survive reconnects and restarts without changing DJ state.
+Three connected people can sit at the bar. Disconnecting frees a stool; reconnecting
+returns someone to the floor if the bar has filled up. Orders can still be collected
+standing. Only choices are broadcast, never animation frames.
+
+Optional Navidrome `bpm` metadata travels through search/album results, queues, and
+on-air records. The scene uses it as an animation speed, falling back to 120 BPM when
+unavailable. Dance timing remains independent of audio analysis. `audio-spectrum.js` captures
+the existing browser media element into a separate Web Audio analyser. Its 22
+logarithmic frequency bands drive the wall bars; measured RMS volume drives the
+floor glow. Samples update only the scene spectrum renderer, at most 30 times per
+second, without rebuilding characters or other UI.
+
+The analyser never connects to an audio output and never changes the player's
+source, volume, mute state, or network request. Capture requires browser support
+(`captureStream` / `mozCaptureStream`) and origin-accessible audio; unsupported or
+cross-origin streams retain a still visualizer and normal playback. It uses no
+microphone and requests no media permissions. Analysis stops while muted, paused,
+hidden, disconnected, in the library, or under reduced motion. A stream reload
+detaches the old capture and attaches the new audio track.
+
+ When the observed track is not on air, characters relax with a slow breathing
+animation and the wall bars settle to a dim baseline. The bartender continues at
+a leisurely pace. Animations pause when disconnected or viewing the library.
+Scene surfaces, lighting, controls, and clothing inherit the selected app theme. Reduced-motion preferences disable all
+scene animation. The Liquidsoap/Icecast control and audio paths are unchanged.
+
 ## Identity and access
 
 There are no accounts. Two separate concerns, deliberately not conflated:
