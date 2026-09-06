@@ -205,11 +205,14 @@ async def search(q: str):
 
 @app.get("/api/songs")
 async def songs(
+    kind: Literal["all", "starred", "highest"] = "all",
     q: str = Query(default="", max_length=500),
     offset: int = Query(default=0, ge=0),
 ):
     try:
-        return _with_room_stats(await navidrome.songs(q, offset))
+        tracks = (await navidrome.songs(q, offset) if kind == "all"
+                  else await navidrome.selected_songs(kind, q, offset))
+        return _with_room_stats(tracks)
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
 

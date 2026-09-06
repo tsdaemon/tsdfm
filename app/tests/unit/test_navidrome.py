@@ -322,3 +322,36 @@ async def test_writes_swallow_failures(client):
     # Sync-back must never raise into the room's loop.
     await client.scrobble("s1")
     await client.star("s1")
+
+
+@respx.mock
+async def test_favourite_songs_filters_before_paging(client):
+    respx.get(f"{BASE}/rest/getStarred2").respond(200, json={
+        "subsonic-response": {"status": "ok", "starred2": {
+            "album": [{"id": "album-only"}],
+            "song": [
+                {"id": "other", "title": "Other", "starred": "2026-03-01"},
+                {"id": "old", "title": "Match old", "starred": "2026-01-01"},
+                {"id": "new", "title": "Match new", "starred": "2026-02-01"},
+            ],
+        }},
+    })
+    songs = await client.selected_songs("starred", "MATCH", offset=1, size=1)
+    assert [song["id"] for song in songs] == ["old"]
+
+
+@respx.mock
+async def test_top_rated_songs_sorts_across_source_pages(client):
+    route = respx.get(f"{BASE}/rest/search3").mock(side_effect=[
+        httpx.Response(200, json={"subsonic-response": {"status": "ok", "searchResult3": {
+            "song": [{"id": "low", "userRating": 2}] + [
+                {"id": f"unrated-{i}"} for i in range(499)
+            ],
+        }}}),
+        httpx.Response(200, json={"subsonic-response": {"status": "ok", "searchResult3": {
+            "song": [{"id": "high", "userRating": 5}],
+        }}}),
+    ])
+    songs = await client.selected_songs("highest", size=1)
+    assert [song["id"] for song in songs] == ["high"]
+    assert route.calls[1].request.url.params["songOffset"] == "500"

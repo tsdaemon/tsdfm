@@ -85,6 +85,36 @@ class NavidromeClient:
         )
         return [self._song_summary(s) for s in data.get("searchResult3", {}).get("song", [])]
 
+    async def selected_songs(self, kind: str, query: str = "", offset: int = 0,
+                             size: int = 48) -> list[dict]:
+        """Filter before paging so favourites and ratings never include other songs."""
+        if kind == "starred":
+            data = await self._browse("getStarred2")
+            songs = data.get("starred2", {}).get("song", [])
+            needle = query.strip().casefold()
+            songs = [song for song in songs if needle in " ".join(
+                song.get(field, "") for field in ("title", "artist", "album")
+            ).casefold()]
+            songs.sort(key=lambda song: song.get("starred", ""), reverse=True)
+        else:
+            # Subsonic has no highest-rated song list. Read all matching pages
+            # before sorting; sorting each page would miss highly rated songs.
+            songs = []
+            start = 0
+            while True:
+                data = await self._browse(
+                    "search3", query=query.strip(), songCount=500, songOffset=start,
+                    artistCount=0, albumCount=0,
+                )
+                page = data.get("searchResult3", {}).get("song", [])
+                songs.extend(song for song in page if (song.get("userRating") or 0) > 0)
+                if len(page) < 500:
+                    break
+                start += len(page)
+            songs.sort(key=lambda song: (-song["userRating"],
+                                         song.get("title", "").casefold(), song["id"]))
+        return [self._song_summary(song) for song in songs[offset:offset + size]]
+
     async def _browse(self, endpoint: str, **params) -> dict:
         try:
             async with httpx.AsyncClient(timeout=10) as client:

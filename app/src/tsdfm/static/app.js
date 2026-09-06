@@ -611,9 +611,13 @@ function renderSearch() {
 const LIBRARY_VIEWS = [
   ["alphabeticalByName", "All albums"], ["alphabeticalByArtist", "By artist"],
   ["songs", "Songs"],
-  ["random", "Random"], ["starred", "Favourites"], ["highest", "Top rated"],
+  ["random", "Random"],
+  ["starredSongs", "Favourite songs"], ["starred", "Favourite albums"],
+  ["highestSongs", "Top rated songs"], ["highest", "Top rated albums"],
   ["newest", "Recently added"], ["recent", "Recently played"], ["frequent", "Most played"],
 ];
+
+const isSongView = kind => ["songs", "starredSongs", "highestSongs"].includes(kind);
 
 // A library track row: title + art (via trackRow) plus a duration and a
 // queue affordance. Shared by album detail and the flat Songs list.
@@ -654,7 +658,7 @@ function renderLibrary() {
   if (memo.library === key) return;
   memo.library = key;
   const mode = lib.album ? "albumDetail"
-    : lib.kind === "songs" ? "songList"
+    : isSongView(lib.kind) ? "songList"
     : (lib.kind === "alphabeticalByArtist" && !lib.query && !lib.artist) ? "artistList"
     : "albumGrid";
   // Only the plain album grid and the flat song list paginate - not an artist's
@@ -670,7 +674,7 @@ function renderLibrary() {
     button.setAttribute("aria-pressed", String(lib.kind === kind && !lib.query));
     button.addEventListener("click", () =>
       kind === "alphabeticalByArtist" ? showArtists()
-        : kind === "songs" ? loadSongs({ query: "", offset: 0 })
+        : isSongView(kind) ? loadSongs({ kind, query: "", offset: 0 })
         : loadAlbums({ kind, query: "", offset: 0 }));
     return button;
   }));
@@ -694,7 +698,7 @@ function renderLibrary() {
   else if (lib.query)
     status = `${lib.albums.length} album${lib.albums.length === 1 ? "" : "s"} matching “${lib.query}”`;
   else
-    status = `Albums ${lib.offset + 1}–${lib.offset + lib.albums.length}${lib.stats ? ` of ${lib.stats.albumCount}` : ""}`;
+    status = `Albums ${lib.offset + 1}–${lib.offset + lib.albums.length}${lib.stats && lib.kind === "alphabeticalByName" ? ` of ${lib.stats.albumCount}` : ""}`;
   $("library-status").textContent = status;
   $("library-error").textContent = lib.error;
 
@@ -706,7 +710,7 @@ function renderLibrary() {
   $("library-prev").disabled = !paged || lib.loading || lib.offset === 0 || lib.kind === "random" && !lib.query;
   $("library-next").disabled = !paged || lib.loading || lib.kind === "random" && !lib.query
     || (mode === "songList" ? lib.songs.length < 48
-        : lib.stats && !lib.query ? lib.offset + 48 >= lib.stats.albumCount : lib.albums.length < 48);
+        : lib.albums.length < 48);
   $("library-refresh").disabled = lib.loading;
   $("library-page").textContent = paged && !lib.query ? `Page ${lib.offset / 48 + 1}` : "";
 
@@ -793,10 +797,11 @@ function loadAlbums(patch = {}) {
 }
 
 function loadSongs(patch = {}) {
-  const lib = { ...state.library, kind: "songs", ...patch };
+  const lib = { ...state.library, ...patch };
+  const kind = { starredSongs: "starred", highestSongs: "highest" }[lib.kind] || "all";
   if (patch.query !== undefined) setState({ libraryDraft: patch.query });
-  return libraryFetch(`/api/songs?${new URLSearchParams({ q: lib.query, offset: lib.offset })}`,
-    { ...patch, kind: "songs", album: null, artist: null, songs: [] }, body => ({ songs: body }));
+  return libraryFetch(`/api/songs?${new URLSearchParams({ kind, q: lib.query, offset: lib.offset })}`,
+    { ...patch, album: null, artist: null, songs: [] }, body => ({ songs: body }));
 }
 
 function loadAlbum(id) {
@@ -1179,16 +1184,16 @@ $("library-query").addEventListener("input", event => setState({ libraryDraft: e
 $("library-search").addEventListener("submit", event => {
   event.preventDefault();
   const patch = { query: $("library-query").value.trim(), offset: 0 };
-  (state.library.kind === "songs" ? loadSongs : loadAlbums)(patch);
+  (isSongView(state.library.kind) ? loadSongs : loadAlbums)(patch);
 });
-const libraryPager = () => state.library.kind === "songs" ? loadSongs : loadAlbums;
+const libraryPager = () => isSongView(state.library.kind) ? loadSongs : loadAlbums;
 $("library-prev").addEventListener("click", () => libraryPager()({ offset: Math.max(0, state.library.offset - 48) }));
 $("library-next").addEventListener("click", () => libraryPager()({ offset: state.library.offset + 48 }));
 $("library-refresh").addEventListener("click", () => {
   const lib = state.library;
   if (lib.album) loadAlbum(lib.album.id);
   else if (lib.artist) loadArtist(lib.artist.id, lib.artist.name);
-  else if (lib.kind === "songs") loadSongs();
+  else if (isSongView(lib.kind)) loadSongs();
   else if (lib.kind === "alphabeticalByArtist" && !lib.query) {
     setState({ library: { ...lib, loading: true, error: "" } });
     fetchArtists(true);
