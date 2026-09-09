@@ -10,6 +10,9 @@ services:
       ICECAST_HOSTNAME: ${ICECAST_HOSTNAME}
       ICECAST_PORT: ${ICECAST_PORT:-6491}
       ICECAST_AUTH_URL: http://host.docker.internal:8080/api/stream-auth
+      # Set in .env to the app's browser origin (e.g. http://localhost:8080) to
+      # let the in-page visualizer read the cross-origin stream. Empty = off.
+      ICECAST_CORS_ORIGIN: ${ICECAST_CORS_ORIGIN-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

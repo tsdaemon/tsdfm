@@ -2,6 +2,7 @@ import asyncio
 
 from helpers import FakeLiquidsoap, drain, make_room, track
 
+from tsdfm import state
 from tsdfm.state import User
 
 
@@ -263,6 +264,45 @@ async def test_offline_dj_stays_visible_with_their_name():
     assert entry["online"] is False
     assert entry["name"] == "Ann"  # remembered, not "?"
     assert [t["title"] for t in entry["queue"]] == ["Queued"]
+
+
+async def test_away_dj_with_queue_is_reaped_after_grace(monkeypatch):
+    """A DJ whose connection drops keeps their slot only for the grace window;
+    if they don't reconnect, they and their stale queue are dropped from the
+    booth rather than sitting in the rotation for hours."""
+    monkeypatch.setattr(state, "DJ_GRACE_SECONDS", 0.0)
+    room, _ = make_room()
+    await room.add_user(User(id="u1", name="Ann"))
+    await room.step_up("u1")
+    await room.add_track("u1", track(title="Playing"))
+    await room.add_track("u1", track(title="Queued"))
+
+    await room.remove_user("u1")
+    assert room.dj_order == ["u1"]  # still there, on borrowed time
+
+    await asyncio.sleep(0.05)  # let the reaper fire
+
+    assert room.dj_order == []
+    assert "u1" not in room.dj_queues
+
+
+async def test_reconnect_within_grace_keeps_dj_and_queue(monkeypatch):
+    """Reconnecting before the grace window closes cancels the reaper - a reload
+    or a brief network blip must not cost a DJ their slot."""
+    monkeypatch.setattr(state, "DJ_GRACE_SECONDS", 0.05)
+    room, _ = make_room()
+    await room.add_user(User(id="u1", name="Ann"))
+    await room.step_up("u1")
+    await room.add_track("u1", track(title="Playing"))
+    await room.add_track("u1", track(title="Queued"))
+
+    await room.remove_user("u1")
+    await room.add_user(User(id="u1", name="Ann"))  # back before the timer fires
+    await asyncio.sleep(0.1)
+
+    assert room.dj_order == ["u1"]
+    assert [t.title for t in room.dj_queues["u1"]] == ["Queued"]
+    assert not room._dj_reapers
 
 
 async def test_step_down_clears_queue():

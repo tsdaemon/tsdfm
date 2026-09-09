@@ -129,6 +129,33 @@ async def test_resume_keeps_queues_when_liquidsoap_is_unreachable(tmp_path):
     assert json.loads(path.read_text())["dj_queues"]["u1"][0]["title"] == "StillQueued"
 
 
+async def test_resume_drops_offline_djs_with_no_queue(tmp_path):
+    """A restart disconnects everyone. A restored DJ with tracks still queued is
+    expected back and keeps their slot; one with an empty queue is a stale ghost
+    (dropped, or their queue drained while away) and is pruned on resume."""
+    path = tmp_path / "state.json"
+    save_state(
+        path,
+        {
+            "dj_order": ["ghost1", "keeper", "ghost2"],
+            "dj_queues": {
+                "ghost1": [],
+                "keeper": [{"navidrome_id": "n1", "title": "Q", "artist": "A", "duration": 100}],
+                "ghost2": [],
+            },
+            "current_dj_index": 2,
+            "known": {"ghost1": {"name": "Denípsus"}, "keeper": {"name": "Nat"}},
+        },
+    )
+    revived, _ = make_room(FakeLiquidsoap(), state_path=path)
+    await revived.resume()
+
+    assert revived.dj_order == ["keeper"]
+    assert "ghost1" not in revived.dj_queues and "ghost2" not in revived.dj_queues
+    # stale index (2, into the pre-prune list) must not survive as-is
+    assert -1 <= revived.current_dj_index < len(revived.dj_order)
+
+
 async def test_resume_survives_a_schema_drifted_queue_entry(tmp_path):
     """One unreadable queue entry (an old/renamed field) must drop just that entry,
     not abort the whole restore."""

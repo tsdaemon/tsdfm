@@ -180,7 +180,8 @@ body {
 .theme-option {
   display: flex;
   align-items: center;
-  padding: 4px;
+  gap: 10px;
+  padding: 4px 10px 4px 4px;
   border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
@@ -189,6 +190,7 @@ body {
 .theme-option:hover:not(:disabled) { filter: none; background: var(--hover); }
 .theme-option[aria-selected="true"] { border-color: var(--accent); }
 .theme-option .theme-swatch i { width: 16px; height: 18px; }
+.theme-option-name { font-size: 13px; font-weight: 500; color: var(--text); white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .theme-trigger-name { transition: none; }
@@ -242,6 +244,76 @@ button:active:not(:disabled) { transform: scale(0.96); }
 
 .player-row { margin-bottom: 16px; }
 .player-row > .panel { min-width: 0; margin-bottom: 0; }
+
+/* Visualizer: a canvas layered behind the On Air panel's content, so the bars
+   fill the empty space around the (small) album art and short titles. The
+   canvas clips itself to the panel's rounded corners so #now-playing can keep
+   overflow visible for the picker popover. */
+#now-playing { position: relative; }
+#now-playing > :not(#viz-bg) { position: relative; z-index: 1; }
+#viz-bg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 62%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  border-radius: 0 0 9px 9px;
+  -webkit-mask-image: linear-gradient(to top, #000 65%, transparent);
+  mask-image: linear-gradient(to top, #000 65%, transparent);
+}
+:root[data-theme="daylight"] #viz-bg { opacity: 0.35; }
+
+/* Visualizer picker - right end of the On Air button row, styled like the theme picker. */
+.viz-picker { position: relative; margin-left: auto; display: flex; align-items: center; }
+.viz-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.viz-trigger:hover:not(:disabled),
+.viz-trigger[aria-expanded="true"] { filter: none; color: var(--text); border-color: var(--border); }
+.viz-caret { opacity: 0.7; }
+.viz-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.viz-opt {
+  display: flex;
+  justify-content: flex-start;
+  padding: 5px 16px 5px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.viz-opt:hover:not(:disabled) { filter: none; background: var(--hover); }
+.viz-opt[aria-selected="true"] { border-color: var(--accent); }
 
 .brand-logo {
   width: 32px;
@@ -351,13 +423,14 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 
 #chat-log { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 #chat-log li .user { color: var(--accent); font-weight: 600; margin-right: 6px; }
+#chat-log li .chat-ts { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-right: 6px; }
 
 .row { display: flex; gap: 8px; margin-top: 8px; }
 .row input { flex: 1; }
 
 /* Favourite (Navidrome star) - neutral until toggled on, then a filled heart. */
-#fav-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-#fav-btn.active { color: var(--fav); border-color: var(--fav); }
+#fav-btn { background: var(--panel); color: var(--muted); border: 1px solid var(--border); }
+#fav-btn.active { background: var(--fav); color: #2a0a1c; border-color: var(--fav); }
 
 #listeners { color: var(--muted); font-size: 13px; }
 

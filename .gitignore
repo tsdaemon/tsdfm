@@ -14,3 +14,6 @@ __pycache__/
 # Persisted room state (queues, rotation, chat) - runtime data, not source
 room-state.json
 .state-*.tmp
+
+.claude/worktrees
+app/cover-cache

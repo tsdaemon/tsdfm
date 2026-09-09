@@ -2,6 +2,10 @@ services:
   icecast:
     environment:
       ICECAST_AUTH_URL: http://app:${APP_PORT:-6490}/api/stream-auth
+      # Normally unset here: a same-origin deploy (app and /radio.mp3 on one
+      # host) needs no CORS. Set it only if the app is served from a different
+      # origin than Icecast.
+      ICECAST_CORS_ORIGIN: ${ICECAST_CORS_ORIGIN-}
 
   app:
     build: ./app
@@ -18,6 +22,9 @@ services:
       LIQUIDSOAP_HOST: liquidsoap
       LIQUIDSOAP_PORT: 1234
       ICECAST_STREAM_URL: ${ICECAST_STREAM_URL}
+      # Same key the icecast service reads; lets the app tag the <audio> element
+      # for CORS. Unset for a same-origin deploy.
+      ICECAST_CORS_ORIGIN: ${ICECAST_CORS_ORIGIN-}
       # Deliberately a different .env key than local dev's INVITE_TOKEN, so the
       # deployed room's invite link can never silently fall back to (or share)
       # your local test room's token - see docs/architecture.md.

@@ -19,6 +19,12 @@ logger = logging.getLogger("room")
 # clock: nothing here predicts when a track starts or ends, it is always observed.
 SYNC_INTERVAL = 1.0
 
+# How long a DJ may stay in the booth after their connection drops. Long enough to
+# ride out a page reload or a brief network blip (identity is stable, so they
+# re-attach to the same slot), short enough that someone who has actually left
+# doesn't sit in the rotation for hours holding a stale queue.
+DJ_GRACE_SECONDS = 120
+
 def _discrete(np: Optional[dict]) -> tuple:
     """The parts of now_playing worth a full state broadcast. The countdown changes
     every tick and must not, on its own, spam every client with a whole snapshot."""
@@ -110,6 +116,11 @@ class Room:
         # empty room over queues that are about to be restored. A Room that never
         # calls resume() persists normally.
         self._persist_armed = True
+
+        # DJs whose connection has dropped but who are still in the booth on
+        # borrowed time: user_id -> the task that will drop them if they don't
+        # reconnect within DJ_GRACE_SECONDS.
+        self._dj_reapers: dict[str, asyncio.Task] = {}
 
         self._sync_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
@@ -205,21 +216,63 @@ class Room:
     async def add_user(self, user: User):
         self.users[user.id] = user
         self.known[user.id] = {"name": user.name, "avatar": user.avatar}
+        # They're back before the grace window closed - keep their booth slot.
+        self._cancel_dj_reaper(user.id)
         await self._publish()
 
     async def remove_user(self, user_id: str):
         # Identity is stable (client-generated id persisted in the browser), so a
-        # disconnect - a reload, a dropped connection - keeps a DJ their slot and
-        # queued tracks: they are expected back. But a DJ who leaves with nothing
-        # queued is just holding an empty slot in the rotation, so drop them; if
-        # they return they can step up again. Only step_down drops a DJ who still
-        # has tracks waiting.
+        # brief disconnect - a reload, a dropped connection - must not cost a DJ
+        # their slot or queued tracks: they are expected straight back. But a DJ
+        # who is actually gone shouldn't sit in the rotation forever holding a
+        # stale queue, so:
+        #   - nothing queued: they're only holding an empty slot, drop them now;
+        #   - tracks still queued: start a grace timer and drop them (and the
+        #     queue) if they haven't reconnected when it fires.
+        # Anything already on air is driven by current_rid, not the queue, so it
+        # plays out either way. Only step_down drops a DJ instantly with tracks
+        # still waiting.
         self.users.pop(user_id, None)
         self.skip_votes.discard(user_id)
-        if user_id in self.dj_order and not self.dj_queues.get(user_id):
+        if user_id in self.dj_order:
+            if self.dj_queues.get(user_id):
+                self._schedule_dj_reaper(user_id)
+            else:
+                self.dj_order.remove(user_id)
+                self.dj_queues.pop(user_id, None)
+                self._cancel_dj_reaper(user_id)
+        await self._publish()
+
+    def _cancel_dj_reaper(self, user_id: str) -> None:
+        task = self._dj_reapers.pop(user_id, None)
+        if task is not None:
+            task.cancel()
+
+    def _schedule_dj_reaper(self, user_id: str) -> None:
+        if user_id in self._dj_reapers:
+            return
+        self._dj_reapers[user_id] = asyncio.create_task(self._reap_dj(user_id))
+
+    async def _reap_dj(self, user_id: str) -> None:
+        try:
+            await asyncio.sleep(DJ_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        self._dj_reapers.pop(user_id, None)
+        # Reconnected in the meantime, or already gone another way.
+        if user_id in self.users or user_id not in self.dj_order:
+            return
+        try:
+            logger.info(
+                "Dropping DJ %s - away %ds without reconnecting",
+                self._name_of(user_id),
+                DJ_GRACE_SECONDS,
+            )
             self.dj_order.remove(user_id)
             self.dj_queues.pop(user_id, None)
-        await self._publish()
+            await self._publish()
+        except Exception:
+            logger.exception("DJ reaper for %s failed", user_id)
 
     async def step_up(self, user_id: str):
         if user_id in self.users and user_id not in self.dj_order:
@@ -232,6 +285,7 @@ class Room:
         if user_id in self.dj_order:
             self.dj_order.remove(user_id)
             self.dj_queues.pop(user_id, None)
+            self._cancel_dj_reaper(user_id)
             await self._publish()
 
     async def add_track(self, user_id: str, track: Track):
@@ -530,6 +584,23 @@ class Room:
                 self.known = saved.get("known", {})
                 self.favorited = saved.get("favorited", False)
                 self.track_stats = saved.get("track_stats", {})
+
+                # A restart disconnects everyone, so every restored DJ is offline
+                # right now. One with tracks still queued is expected back and
+                # keeps their slot; one with an empty queue is just a stale ghost
+                # in the rotation (a DJ who dropped, or whose queue drained while
+                # they were away) - drop them, exactly as remove_user would on a
+                # live disconnect. They can step up again when they return.
+                stale = [uid for uid in self.dj_order if not self.dj_queues.get(uid)]
+                for uid in stale:
+                    self.dj_order.remove(uid)
+                    self.dj_queues.pop(uid, None)
+                if stale:
+                    logger.info("Dropped %d stale offline DJ(s) on resume: %s", len(stale),
+                                ", ".join(self._name_of(uid) for uid in stale))
+                if not (-1 <= self.current_dj_index < len(self.dj_order)):
+                    self.current_dj_index = -1
+
                 queued = sum(len(q) for q in self.dj_queues.values())
                 logger.info(
                     "Restored %d DJ(s) and %d queued track(s) from disk", len(self.dj_order), queued
@@ -591,6 +662,9 @@ class Room:
     async def stop(self) -> None:
         for task in list(self._bg):
             task.cancel()
+        for task in list(self._dj_reapers.values()):
+            task.cancel()
+        self._dj_reapers.clear()
         if self._sync_task:
             self._sync_task.cancel()
             try:

@@ -2,6 +2,10 @@
     <location>Earth</location>
     <admin>admin@localhost</admin>
 
+    <!-- Rendered by entrypoint.sh: an <http-headers> block with credentialed
+         CORS headers when ICECAST_CORS_ORIGIN is set, empty otherwise. -->
+    ${ICECAST_HTTP_HEADERS}
+
     <limits>
         <clients>100</clients>
         <sources>2</sources>

@@ -63,6 +63,11 @@ NAVIDROME_PASSWORD = os.environ["NAVIDROME_PASSWORD"]
 LIQUIDSOAP_HOST = os.environ.get("LIQUIDSOAP_HOST", "liquidsoap")
 LIQUIDSOAP_PORT = int(os.environ.get("LIQUIDSOAP_PORT", "1234"))
 ICECAST_STREAM_URL = os.environ["ICECAST_STREAM_URL"]
+# When set (to the browser-facing app origin), Icecast is configured to send
+# credentialed-CORS headers for the stream, so the page can tag the <audio>
+# element crossorigin="use-credentials" and the in-page visualizer can read it
+# even when the stream is a different origin than the app (local-dev split).
+STREAM_CORS = bool(os.environ.get("ICECAST_CORS_ORIGIN"))
 INVITE_TOKEN = os.environ.get("INVITE_TOKEN") or None
 if not INVITE_TOKEN:
     raise RuntimeError("INVITE_TOKEN is not set - run `task invite` to generate one")
@@ -183,6 +188,7 @@ async def index(request: Request):
         {
             "request": request,
             "stream_url": ICECAST_STREAM_URL,
+            "stream_cors": STREAM_CORS,
             "asset_version": ASSET_VERSION,
         },
     )

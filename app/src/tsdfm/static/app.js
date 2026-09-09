@@ -18,7 +18,7 @@ const PLACEHOLDER_ART = "data:image/svg+xml;utf8," + encodeURIComponent(
 );
 
 // Inline MDI (pictogrammers.com/library/mdi) icons - kept as raw SVG rather than
-// pulling in an icon font/CDN, so the app has no external asset deps.
+// pulling in an icon font/CDN.
 const ICONS = {
   volumeOff: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12,4L9.91,6.09L12,8.18M4.27,3L3,4.27L7.73,9H3V15H7L12,20V13.27L16.25,17.53C15.58,18.04 14.83,18.46 14,18.7V20.77C15.38,20.45 16.63,19.82 17.68,18.96L19.73,21L21,19.73L12,10.73M19,12C19,12.94 18.8,13.82 18.46,14.64L19.97,16.15C20.62,14.91 21,13.5 21,12C21,7.72 18,4.14 14,3.23V5.29C16.89,6.15 19,8.83 19,12M16.5,12C16.5,10.23 15.5,8.71 14,7.97V10.18L16.45,12.63C16.5,12.43 16.5,12.21 16.5,12Z" /></svg>',
   volumeHigh: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14,3.23V5.29C16.89,6.15 19,8.83 19,12C19,15.17 16.89,17.84 14,18.7V20.77C18,19.86 21,16.28 21,12C21,7.72 18,4.14 14,3.23M16.5,12C16.5,10.23 15.5,8.71 14,7.97V16C15.5,15.29 16.5,13.76 16.5,12M3,9V15H7L12,20V4L7,9H3Z" /></svg>',
@@ -56,6 +56,14 @@ function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// Wall-clock HH:MM in the viewer's locale, from an epoch-seconds timestamp.
+function formatClock(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function setArt(imgEl, url) {
@@ -290,6 +298,7 @@ function buildThemeMenu() {
     (t) =>
       `<button type="button" class="theme-option" role="option" data-theme-key="${t.key}" title="${t.label}" aria-label="${t.label}">` +
         `<span class="theme-swatch" aria-hidden="true">${swatchHtml(t.colors)}</span>` +
+        `<span class="theme-option-name">${t.label}</span>` +
       `</button>`
   ).join("");
   menu.querySelectorAll(".theme-option").forEach((btn) => {
@@ -564,7 +573,12 @@ function renderChat() {
     const li = document.createElement("li");
     li.className = "enter";
     const avatar = msg.avatar ? `${msg.avatar} ` : "";
-    li.innerHTML = `<span class="user">${avatar}${escapeHtml(msg.user)}</span>${escapeHtml(msg.text)}`;
+    let stamp = "";
+    if (msg.ts) {
+      const d = new Date(msg.ts * 1000);
+      stamp = `<time class="chat-ts" datetime="${d.toISOString()}" title="${escapeHtml(d.toLocaleString())}">${escapeHtml(formatClock(msg.ts))}</time> `;
+    }
+    li.innerHTML = `${stamp}<span class="user">${avatar}${escapeHtml(msg.user)}</span>${escapeHtml(msg.text)}`;
     log.appendChild(li);
   }
   if (state.chat.length !== memo.chatCount) log.scrollTop = log.scrollHeight;
