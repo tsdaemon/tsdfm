@@ -6,7 +6,11 @@ services:
   app:
     build: ./app
     depends_on:
-      - liquidsoap
+      liquidsoap:
+        # Wait for liquidsoap's telnet control port to actually accept connections,
+        # not just for its container to start - otherwise room.resume() races it on
+        # every redeploy. (resume() tolerates the race now too; this removes it.)
+        condition: service_healthy
     environment:
       NAVIDROME_URL: ${NAVIDROME_URL}
       NAVIDROME_USERNAME: ${NAVIDROME_USERNAME}

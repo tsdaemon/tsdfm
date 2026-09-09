@@ -91,6 +91,8 @@ tasks:
     desc: Build and (re)start the full stack on the remote NAS, behind Traefik
     dotenv: ['.env.deploy']
     cmds:
+      # `up` recreates only the services whose config or image actually changed,
+      # so a routine app change leaves liquidsoap/icecast (and the stream) alone.
       - docker --context theseus compose -f docker-compose.yml -f docker-compose.deploy.yml up -d --build
 
   deploy:down:

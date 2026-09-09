@@ -21,9 +21,11 @@ task --list        # everything else
 
 `docker-compose.yml` (icecast + liquidsoap only) is used both by `task dev` locally and as
 the base for `task deploy`, which layers `docker-compose.deploy.yml` on top to add the
-`app` service, Traefik routing labels, and a Homepage widget label. The app never runs in
-local Docker — only via `task dev` (host) or `task deploy` (remote). See
-`docs/architecture.md` for the full topology.
+`app` service, Traefik routing labels, and a Homepage widget label. `docker compose up`
+recreates only the services whose config or image changed, so a routine app-only deploy
+leaves liquidsoap and icecast running. The app never runs in local Docker — only via
+`task dev` (host) or `task deploy` (remote). See `docs/architecture.md` for the full
+topology.
 
 Python is managed with **uv** (`app/pyproject.toml`, src layout at `app/src/tsdfm/`).
 Use `uv run ...`, not a hand-rolled venv. `uv.lock` is committed; `.venv` is not.

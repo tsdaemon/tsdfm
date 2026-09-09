@@ -104,6 +104,57 @@ async def test_resume_starts_fresh_when_the_request_is_gone(tmp_path):
     assert room.current_rid is None
 
 
+async def test_resume_keeps_queues_when_liquidsoap_is_unreachable(tmp_path):
+    """A redeploy restarts liquidsoap too; its telnet port is often not up yet when
+    resume() runs. That must not cost anyone their queue - the regression that
+    logged 'starting empty' and then re-persisted an empty room over the saved one."""
+    path = tmp_path / "state.json"
+    room, _ = make_room(FakeLiquidsoap(), state_path=path)
+    await room.add_user(User(id="u1", name="Ann", avatar="🎧"))
+    await room.step_up("u1")
+    await room.add_track("u1", track(title="OnAir"))
+    await room.add_track("u1", track(title="StillQueued", artist="Someone"))
+
+    dead_ls = FakeLiquidsoap()
+    dead_ls.unavailable = True
+    revived, _ = make_room(dead_ls, state_path=path)
+    await revived.resume()  # must not raise
+
+    assert revived.dj_order == ["u1"]
+    assert [t.title for t in revived.dj_queues["u1"]] == ["StillQueued"]
+    assert revived._persist_armed is True
+
+    # and a later persist writes the queue back rather than an empty room
+    revived._persist()
+    assert json.loads(path.read_text())["dj_queues"]["u1"][0]["title"] == "StillQueued"
+
+
+async def test_resume_survives_a_schema_drifted_queue_entry(tmp_path):
+    """One unreadable queue entry (an old/renamed field) must drop just that entry,
+    not abort the whole restore."""
+    path = tmp_path / "state.json"
+    save_state(
+        path,
+        {
+            "dj_order": ["u1"],
+            "dj_queues": {"u1": [
+                {"navidrome_id": "nd-1", "title": "Good", "artist": "A", "duration": 100},
+                {"title": "Broken - no navidrome_id", "artist": "B", "duration": 100},
+            ]},
+            "current_dj_index": 0,
+            "known": {"u1": {"name": "Ann", "avatar": "🎧"}},
+        },
+    )
+    room, _ = make_room(FakeLiquidsoap(), state_path=path)
+
+    await room.resume()
+
+    # "Good" survived the restore (resume() then cues it); "Broken" was dropped
+    # without aborting the load.
+    assert room.current_record["title"] == "Good"
+    assert room.dj_queues["u1"] == []
+
+
 async def test_track_stats_survive_a_restart(tmp_path):
     """The room's own play/like tallies are persisted like everything else."""
     path = tmp_path / "state.json"

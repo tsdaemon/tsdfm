@@ -1062,8 +1062,11 @@ async function loadLogHistory() {
 const radioAudio = $("radio-audio");
 const muteBtn = $("mute-btn");
 const volumeSlider = $("volume-slider");
-const LIVE_LAG_TOLERANCE = 5;
+const LIVE_LAG_TOLERANCE = 20;  // seconds of buffered backlog before we chase the live edge
+const STALL_RELOAD_MS = 8000;   // how long a stall must persist before we reconnect the stream
 let lastSyncedTrackId = null;
+let hiccupSinceTrackChange = false;
+let stallTimer = null;
 
 function audioIsAudible() {
   // "Sound is reaching the listener" - all three have to be true. A blocked
@@ -1102,9 +1105,21 @@ function liveLagSeconds() {
   }
 }
 
+function reloadStream() {
+  // Tearing the Icecast connection down and reopening it is the only thing that
+  // actually catches a live <audio> up - but on reconnect Icecast replays its
+  // burst buffer (~1.5s of whatever it last sent), so a routine track change must
+  // never reach here or a skip sounds like the previous song playing again.
+  const wasMuted = radioAudio.muted;
+  radioAudio.load();
+  radioAudio.muted = wasMuted;
+  ensurePlaying();
+}
+
 function resyncToLiveEdge() {
-  // Sitting in an idle room means buffering silence. If that backlog builds up, a
-  // track starting at the source isn't heard until the backlog drains.
+  // Sitting in an idle room means buffering silence. If playback then hiccups it
+  // can resume well behind live, and the next real track is heard late. Try a
+  // cheap gapless seek first, reconnect only if that can't move us.
   if (liveLagSeconds() <= LIVE_LAG_TOLERANCE) return;
   try {
     radioAudio.currentTime = radioAudio.buffered.end(radioAudio.buffered.length - 1);
@@ -1112,10 +1127,28 @@ function resyncToLiveEdge() {
   } catch {
     // Live streams usually aren't seekable; fall through and reconnect instead.
   }
-  const wasMuted = radioAudio.muted;
-  radioAudio.load();
-  radioAudio.muted = wasMuted;
-  ensurePlaying();
+  reloadStream();
+}
+
+// A stall that clears within a few seconds is just a track boundary rebuffering
+// and is left alone. One that persists means the connection is wedged - reconnect
+// even if no new track has been announced.
+for (const event of ["waiting", "stalled", "error"]) {
+  radioAudio.addEventListener(event, () => {
+    hiccupSinceTrackChange = true;
+    if (stallTimer !== null) return;
+    stallTimer = setTimeout(() => {
+      stallTimer = null;
+      if (radioAudio.readyState < radioAudio.HAVE_FUTURE_DATA) reloadStream();
+    }, STALL_RELOAD_MS);
+  });
+}
+for (const event of ["playing", "timeupdate"]) {
+  radioAudio.addEventListener(event, () => {
+    if (stallTimer === null) return;
+    clearTimeout(stallTimer);
+    stallTimer = null;
+  });
 }
 
 function syncAudio() {
@@ -1123,7 +1156,11 @@ function syncAudio() {
   const id = np && np.on_air ? np.id : null;
   if (id && id !== lastSyncedTrackId) {
     lastSyncedTrackId = id;
-    resyncToLiveEdge();
+    // Only chase the live edge if playback actually hiccuped while the last track
+    // was on. A clean track change or skip is left completely alone, so it no
+    // longer forces an Icecast reconnect (and the burst-buffer replay with it).
+    if (hiccupSinceTrackChange) resyncToLiveEdge();
+    hiccupSinceTrackChange = false;
   }
   if (!id) lastSyncedTrackId = null;
 }

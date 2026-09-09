@@ -132,7 +132,9 @@ task deploy:down   # stop it
 `task deploy` runs `docker compose` against both `docker-compose.yml` (icecast +
 liquidsoap, same as local) and `docker-compose.deploy.yml` (adds the `app` service, its
 Traefik router labels, and a [Homepage](https://gethomepage.dev) dashboard widget showing
-the live listener count via `GET /api/stats`). Icecast's audio port is still published
+the live listener count via `GET /api/stats`). `docker compose up` recreates only the
+services whose config or image changed, so a routine app-only deploy leaves liquidsoap
+and icecast — and the live stream — running. Icecast's audio port is still published
 directly rather than routed through Traefik — see `docs/architecture.md`.
 
 ## Development

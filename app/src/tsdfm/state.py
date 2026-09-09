@@ -38,6 +38,23 @@ class Track:
     def __post_init__(self):
         self.art_url = local_art_url(self.art_url)
 
+    @classmethod
+    def from_saved(cls, raw: dict) -> Optional["Track"]:
+        """Build a Track from a persisted dict, tolerating schema drift. An older or
+        newer file with extra/renamed keys must not abort the whole restore - a bad
+        entry is dropped, the rest of the queue survives."""
+        try:
+            return cls(
+                navidrome_id=raw["navidrome_id"],
+                title=raw["title"],
+                artist=raw["artist"],
+                duration=raw.get("duration") or 0,
+                art_url=raw.get("art_url"),
+            )
+        except (KeyError, TypeError):
+            logger.warning("Dropping unreadable saved queue entry: %r", raw)
+            return None
+
 
 @dataclass
 class User:
@@ -87,6 +104,12 @@ class Room:
         # we ask liquidsoap whether that exact request is cueing, on air, or finished.
         self.current_rid: Optional[str] = None
         self.current_record: Optional[dict] = None
+
+        # resume() drops this while it is loading the saved file, so a _persist()
+        # racing the load (a client connecting, the first sync tick) can't write an
+        # empty room over queues that are about to be restored. A Room that never
+        # calls resume() persists normally.
+        self._persist_armed = True
 
         self._sync_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
@@ -148,7 +171,7 @@ class Room:
         return max(1, (len(self.users) // 2) + 1)
 
     def _persist(self) -> None:
-        if not self.state_path:
+        if not self.state_path or not self._persist_armed:
             return
         save_state(
             self.state_path,
@@ -492,30 +515,59 @@ class Room:
     async def resume(self) -> None:
         """Restore the room after a restart and re-attach to whatever liquidsoap is
         still broadcasting, instead of starting a second track on top of it."""
-        saved = load_state(self.state_path) if self.state_path else None
-        if saved:
-            self.dj_order = saved.get("dj_order", [])
-            self.dj_queues = {
-                uid: [Track(**t) for t in tracks]
-                for uid, tracks in saved.get("dj_queues", {}).items()
-            }
-            self.current_dj_index = saved.get("current_dj_index", -1)
-            self.chat_history = saved.get("chat_history", [])
-            self.play_history = saved.get("play_history", [])
-            self.known = saved.get("known", {})
-            self.favorited = saved.get("favorited", False)
-            self.track_stats = saved.get("track_stats", {})
-            queued = sum(len(q) for q in self.dj_queues.values())
-            logger.info(
-                "Restored %d DJ(s) and %d queued track(s) from disk", len(self.dj_order), queued
-            )
+        self._persist_armed = False
+        try:
+            saved = load_state(self.state_path) if self.state_path else None
+            if saved:
+                self.dj_order = saved.get("dj_order", [])
+                self.dj_queues = {
+                    uid: [t for t in (Track.from_saved(raw) for raw in tracks) if t is not None]
+                    for uid, tracks in saved.get("dj_queues", {}).items()
+                }
+                self.current_dj_index = saved.get("current_dj_index", -1)
+                self.chat_history = saved.get("chat_history", [])
+                self.play_history = saved.get("play_history", [])
+                self.known = saved.get("known", {})
+                self.favorited = saved.get("favorited", False)
+                self.track_stats = saved.get("track_stats", {})
+                queued = sum(len(q) for q in self.dj_queues.values())
+                logger.info(
+                    "Restored %d DJ(s) and %d queued track(s) from disk", len(self.dj_order), queued
+                )
+        finally:
+            # Queues are in memory now (or there was nothing saved); it is safe to
+            # let persistence write the file again - and it must be re-armed even if
+            # the load above half-failed, so a partial restore is still saved rather
+            # than left only on disk where the next start re-reads the same problem.
+            self._persist_armed = True
 
         # Liquidsoap kept broadcasting while we were down. Rather than guessing whether
         # audio survived, ask about the exact request we were last driving: if it still
         # exists we simply resume observing it, and if it doesn't we start fresh.
         saved_rid = (saved or {}).get("current_rid")
         saved_record = (saved or {}).get("current_record")
-        if saved_rid and saved_record and await self.liquidsoap.request_metadata(saved_rid):
+        try:
+            still_on_air = bool(
+                saved_rid and saved_record and await self.liquidsoap.request_metadata(saved_rid)
+            )
+        except LiquidsoapUnavailable:
+            # A redeploy restarts liquidsoap too, and its telnet port is often not
+            # up yet when we get here. That is not a reason to drop the queues we
+            # just restored - keep them, hold the saved track so the sync loop can
+            # still re-attach if it really is the same song, and let that loop
+            # reconcile the audio once liquidsoap answers.
+            logger.warning(
+                "liquidsoap unreachable during resume - keeping restored queues, "
+                "audio will reconcile on the next sync tick"
+            )
+            if saved_rid and saved_record:
+                self.current_rid = saved_rid
+                self.current_record = {**saved_record, "art_url": local_art_url(saved_record.get("art_url"))}
+                self.like_votes = set(saved.get("like_votes", []))
+                self.skip_votes = set(saved.get("skip_votes", []))
+            return
+
+        if still_on_air:
             self.current_rid = saved_rid
             self.current_record = saved_record
             self.current_record["art_url"] = local_art_url(saved_record.get("art_url"))
@@ -527,7 +579,10 @@ class Room:
             # Whatever was playing is gone; its votes/star must not bleed onto the next.
             self.favorited = False
 
-        await self._sync_once()
+        try:
+            await self._sync_once()
+        except LiquidsoapUnavailable:
+            pass
 
     def start(self) -> None:
         if self._sync_task is None or self._sync_task.done():

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from tsdfm.cover_cache import CoverCache
 from tsdfm.liquidsoap_control import LiquidsoapControl
 from tsdfm.navidrome import NavidromeClient
 from tsdfm.state import Room, Track, User
@@ -67,6 +68,9 @@ if not INVITE_TOKEN:
     raise RuntimeError("INVITE_TOKEN is not set - run `task invite` to generate one")
 STATE_PATH = Path(os.environ.get("STATE_PATH", Path.cwd() / "room-state.json"))
 STATS_API_TOKEN = os.environ.get("STATS_API_TOKEN", "")
+# Sits on the same volume as the room state by default, so the deploy needs no
+# extra mount. Cover art is tiny; the cap is a guard against unbounded growth.
+COVER_CACHE_DIR = Path(os.environ.get("COVER_CACHE_DIR", STATE_PATH.parent / "cover-cache"))
 
 
 @asynccontextmanager
@@ -76,9 +80,11 @@ async def lifespan(_app: FastAPI):
     try:
         await room.resume()
     except Exception:
-        # A liquidsoap hiccup at boot must never stop the app from serving; the sync
-        # loop will reconcile as soon as it can reach it.
-        logger.exception("Could not restore room state - starting empty")
+        # resume() already tolerates a missing/unreadable file and an unreachable
+        # liquidsoap on its own, so reaching here means something genuinely
+        # unexpected - serve anyway and let the sync loop reconcile. Whatever
+        # resume() did manage to load stays in memory.
+        logger.exception("room.resume() failed unexpectedly - continuing with whatever was restored")
     room.start()
     try:
         yield
@@ -145,6 +151,7 @@ async def stream_auth(request: Request):
 templates = Jinja2Templates(directory=str(STATIC_DIR))
 
 navidrome = NavidromeClient(NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWORD)
+cover_cache = CoverCache(COVER_CACHE_DIR)
 liquidsoap = LiquidsoapControl(LIQUIDSOAP_HOST, LIQUIDSOAP_PORT)
 
 active_sockets: dict[str, WebSocket] = {}
@@ -257,12 +264,21 @@ async def artist(id: str = Query(min_length=1, max_length=512)):
 
 @app.get("/api/cover-art")
 async def cover_art(id: str = Query(min_length=1, max_length=512), size: int = Query(default=300, ge=1, le=1000)):
-    try:
-        content, media_type = await navidrome.cover_art(id, size)
-    except RuntimeError:
-        return Response(status_code=502)
+    hit = await cover_cache.get(id, size)
+    if hit is not None:
+        content, media_type = hit
+    else:
+        try:
+            content, media_type = await navidrome.cover_art(id, size)
+        except RuntimeError:
+            # no-store so a "cache everything" CDN rule can't pin a transient 502.
+            return Response(status_code=502, headers={"Cache-Control": "no-store"})
+        await cover_cache.put(id, size, content, media_type)
     return Response(content, media_type=media_type, headers={
-        "Cache-Control": "private, max-age=3600",
+        # Art is immutable per (id, size); let the browser and the CDN both hold it
+        # hard so a library grid stops fanning dozens of requests at the origin.
+        "Cache-Control": "public, max-age=604800, immutable",
+        "Cloudflare-CDN-Cache-Control": "max-age=2592000",
         "X-Content-Type-Options": "nosniff",
     })
 
