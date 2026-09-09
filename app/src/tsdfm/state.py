@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -76,11 +77,15 @@ class Room:
         navidrome,
         broadcast: Callable[[dict], Awaitable[None]],
         state_path: Optional[Path] = None,
+        dj_break=None,
     ):
         self.liquidsoap = liquidsoap
         self.navidrome = navidrome
         self.broadcast = broadcast
         self.state_path = state_path
+        # Optional DjBreakStudio. None (no OPENROUTER_API_KEY, or a test) just means the
+        # feature never fires - the UI toggle still works.
+        self.dj_break = dj_break
 
         self.users: dict[str, User] = {}
         self.dj_order: list[str] = []
@@ -104,6 +109,23 @@ class Room:
         # Names/avatars outlive connections so a DJ restored from disk, or one who
         # dropped mid-set, still shows up as themselves rather than "?".
         self.known: dict[str, dict] = {}
+
+        # DJ breaks: a room-wide toggle (any listener flips it, like the star button),
+        # persisted. `_next_break` is a clip generated while the current track plays and
+        # consumed at the gap; it is transient, like now_playing. `_breaks_since` counts
+        # gaps since the last break so `every_n` can space them out.
+        self.dj_breaks_enabled: bool = False
+        self._next_break = None
+        self._break_generating: bool = False
+        self._breaks_since: int = 0
+        # Filesystem path of the break clip currently on air, so it can be deleted once
+        # it has played (the record only carries the liquidsoap-visible path).
+        self._break_local_path: Optional[str] = None
+        # A short rolling log of joins / leaves / booth changes, and the time of the last
+        # break - together they let each break react to only what's happened since the
+        # last one (chat lines carry their own ts). Colour for the prompt, nothing else.
+        self.room_events: list[dict] = []
+        self._last_break_at: float = 0.0
 
         # What we last handed to liquidsoap. `current_record` holds the display fields
         # (art, DJ, duration) that liquidsoap doesn't know about; `current_rid` is how
@@ -150,6 +172,12 @@ class Room:
             return self.users[user_id].avatar
         return self.known.get(user_id, {}).get("avatar", "🙂")
 
+    def _log_event(self, text: str) -> None:
+        """Record a one-line room event ("Ann joined", "Bo stepped up to DJ") for the
+        DJ break prompt. Ephemeral - not persisted, not broadcast."""
+        self.room_events.append({"text": text, "ts": time.time()})
+        self.room_events = self.room_events[-20:]
+
     def snapshot(self) -> dict:
         return {
             "type": "state",
@@ -174,11 +202,16 @@ class Room:
             "skip_votes_needed": self._votes_needed(),
             "like_votes": len(self.like_votes),
             "favorited": self.favorited,
+            "dj_breaks_enabled": self.dj_breaks_enabled,
             "chat_history": self.chat_history[-50:],
             "play_history": self.play_history[-25:],
         }
 
     def _votes_needed(self) -> int:
+        # A DJ break is short filler - one thumbs-down ends it, which is also the escape
+        # hatch if a clip hangs or Piper produced garbage.
+        if self.now_playing and self.now_playing.get("kind") == "break":
+            return 1
         return max(1, (len(self.users) // 2) + 1)
 
     def _persist(self) -> None:
@@ -205,6 +238,7 @@ class Room:
                 "current_rid": self.current_rid,
                 "current_record": self.current_record,
                 "known": self.known,
+                "dj_breaks_enabled": self.dj_breaks_enabled,
             },
         )
 
@@ -214,10 +248,15 @@ class Room:
         await self.broadcast(self.snapshot())
 
     async def add_user(self, user: User):
+        # A re-join with the same client_id is also how a profile edit and a reconnect
+        # arrive - only note it as a "joined" when they weren't already connected.
+        fresh = user.id not in self.users
         self.users[user.id] = user
         self.known[user.id] = {"name": user.name, "avatar": user.avatar}
         # They're back before the grace window closed - keep their booth slot.
         self._cancel_dj_reaper(user.id)
+        if fresh:
+            self._log_event(f"{user.name} joined")
         await self._publish()
 
     async def remove_user(self, user_id: str):
@@ -232,6 +271,8 @@ class Room:
         # Anything already on air is driven by current_rid, not the queue, so it
         # plays out either way. Only step_down drops a DJ instantly with tracks
         # still waiting.
+        name = self._name_of(user_id)
+        was_here = user_id in self.users
         self.users.pop(user_id, None)
         self.skip_votes.discard(user_id)
         if user_id in self.dj_order:
@@ -241,6 +282,8 @@ class Room:
                 self.dj_order.remove(user_id)
                 self.dj_queues.pop(user_id, None)
                 self._cancel_dj_reaper(user_id)
+        if was_here:
+            self._log_event(f"{name} left")
         await self._publish()
 
     def _cancel_dj_reaper(self, user_id: str) -> None:
@@ -270,6 +313,7 @@ class Room:
             )
             self.dj_order.remove(user_id)
             self.dj_queues.pop(user_id, None)
+            self._log_event(f"{self._name_of(user_id)} dropped from DJ (away too long)")
             await self._publish()
         except Exception:
             logger.exception("DJ reaper for %s failed", user_id)
@@ -278,14 +322,17 @@ class Room:
         if user_id in self.users and user_id not in self.dj_order:
             self.dj_order.append(user_id)
             self.dj_queues[user_id] = []
+            self._log_event(f"{self._name_of(user_id)} stepped up to DJ")
             await self._publish()
             await self._start_next()
 
     async def step_down(self, user_id: str):
         if user_id in self.dj_order:
+            name = self._name_of(user_id)
             self.dj_order.remove(user_id)
             self.dj_queues.pop(user_id, None)
             self._cancel_dj_reaper(user_id)
+            self._log_event(f"{name} stepped down from DJ")
             await self._publish()
 
     async def add_track(self, user_id: str, track: Track):
@@ -324,6 +371,21 @@ class Room:
             queue = self.dj_queues.get(dj_id)
             if queue:
                 self.current_dj_index = idx
+                return queue[0], dj_id
+        return None, None
+
+    def _peek_next(self):
+        """What _pick_next() would hand over, without advancing the rotation. Used to
+        build 'coming up next' patter and to check there is a song for a break to lead
+        into - a break into silence is just dead air."""
+        n = len(self.dj_order)
+        if n == 0:
+            return None, None
+        for step in range(1, n + 1):
+            idx = (self.current_dj_index + step) % n
+            dj_id = self.dj_order[idx]
+            queue = self.dj_queues.get(dj_id)
+            if queue:
                 return queue[0], dj_id
         return None, None
 
@@ -367,6 +429,7 @@ class Room:
             self.favorited = False
             self.current_rid = rid
             self.current_record = {
+                "kind": "track",
                 "id": track_id,
                 "navidrome_id": track.navidrome_id,
                 "title": track.title,
@@ -445,19 +508,219 @@ class Room:
         meta = await self.liquidsoap.request_metadata(rid)
         if meta is None:
             # Liquidsoap dropped the request: it played out, or failed to resolve.
-            played = self.current_record
-            self._record_played(played)
+            finished = self.current_record
             self.current_rid = None
             self.current_record = None
-            # Rating already moved as each vote landed; only the play is news here.
-            self._spawn(self._scrobble_play(played))
-            await self._go_idle()
+            if finished and finished.get("kind") == "break":
+                # A break is never scrobbled and never enters play_history / track_stats.
+                await self._finish_break(finished)
+            else:
+                self._record_played(finished)
+                # Rating already moved as each vote landed; only the play is news here.
+                self._spawn(self._scrobble_play(finished))
+                await self._after_track()
             return
 
         pending = await self.liquidsoap.pending_rids()
         on_air = rid not in pending
         remaining = await self.liquidsoap.remaining() if on_air else None
         await self._show({**self.current_record, "on_air": on_air, "remaining": remaining})
+        if on_air and self.current_record and self.current_record.get("kind") == "track":
+            self._maybe_prepare_break()
+
+    # ---- DJ breaks -------------------------------------------------------------
+    #
+    # A break is observed exactly like a track (cue -> on air -> gone). It is pushed
+    # through the same queue and the same three reads; the only differences are that its
+    # uri is a local file, its record carries kind="break", and it is never scrobbled or
+    # added to history. Generation is best-effort and runs off this loop - if a clip
+    # isn't ready when the track ends, the next song just plays.
+
+    async def _after_track(self) -> None:
+        """A real track just left the air. Air a prepared break if one is ready and there
+        is a next song for it to lead into; otherwise behave exactly as before."""
+        clip = self._next_break
+        if (
+            clip is not None
+            and self.dj_breaks_enabled
+            and self._peek_next()[0] is not None
+        ):
+            if await self._push_break(clip):
+                self._next_break = None
+                return
+        self._breaks_since += 1
+        await self._go_idle()
+
+    def _maybe_prepare_break(self) -> None:
+        """Called every tick while a track is on air: kick off generating the next break
+        so it is ready by the time this track ends. Idempotent and self-healing, so
+        enabling the toggle mid-track just works."""
+        if not self.dj_breaks_enabled or self.dj_break is None:
+            return
+        if not getattr(self.dj_break, "enabled", False):
+            return
+        if self._next_break is not None or self._break_generating:
+            return
+        every = max(1, getattr(self.dj_break, "every_n", 1))
+        if self._breaks_since + 1 < every:
+            return
+        if self._peek_next()[0] is None:
+            return
+        self._break_generating = True
+        self._spawn(self._prepare_break())
+
+    async def _prepare_break(self) -> None:
+        try:
+            just = self.current_record
+            if not just or just.get("kind") != "track":
+                return
+            nxt, _ = self._peek_next()
+            coming_up = {"title": nxt.title, "artist": nxt.artist} if nxt else None
+            # Only what's happened since the last break, so the DJ reacts to what's new.
+            since = self._last_break_at
+            context = {
+                "chat": [
+                    {"user": m.get("user", "?"), "text": (m.get("text") or "")[:200]}
+                    for m in self.chat_history
+                    if m.get("ts", 0) > since
+                ][-8:],
+                "events": [e["text"] for e in self.room_events if e["ts"] > since][-10:],
+            }
+            clip = await self.dj_break.script_and_voice(
+                {"title": just.get("title"), "artist": just.get("artist")},
+                coming_up,
+                context,
+            )
+            if clip is None:
+                return
+            if self.dj_breaks_enabled and self._next_break is None:
+                self._next_break = clip
+                logger.info("DJ break ready (%s): %s", clip.model, clip.text)
+            else:
+                # Toggled off, or one already queued, while we were generating.
+                self._unlink_path(clip.local_path)
+        finally:
+            self._break_generating = False
+
+    async def _push_break(self, clip) -> bool:
+        async with self._lock:
+            if self.current_rid is not None:
+                return False
+            try:
+                stale_rids = await self.liquidsoap.pending_rids()
+            except LiquidsoapUnavailable:
+                return False
+            for stale in stale_rids:
+                await self.liquidsoap.remove(stale)
+
+            break_id = uuid4().hex
+            rid = await self.liquidsoap.push(
+                clip.path, annotations={"tsdfm_id": break_id}
+            )
+            if rid is None:
+                logger.warning("liquidsoap rejected DJ break clip %s", clip.path)
+                return False
+
+            self.skip_votes.clear()
+            self.like_votes.clear()
+            self.favorited = False
+            self._breaks_since = 0
+            self._last_break_at = time.time()
+            self._break_local_path = clip.local_path
+            self.current_rid = rid
+            self.current_record = {
+                "kind": "break",
+                "id": break_id,
+                "navidrome_id": None,
+                "title": "DJ break",
+                "artist": "\U0001f4fb DJ",
+                "art_url": None,
+                "text": clip.text,
+                "model": clip.model,
+                "dj_name": "\U0001f4fb DJ",
+                "dj_id": None,
+                "duration": 0,
+            }
+            logger.info("DJ break on air (%s): %s", clip.model, clip.text)
+
+        # The patter and which model wrote it, visible in the room's chat.
+        await self.broadcast(
+            {
+                "type": "chat",
+                "user": "DJ",
+                "avatar": "\U0001f4fb",
+                "text": f"{clip.text}  —  {clip.model}",
+                "ts": time.time(),
+            }
+        )
+        # Show it right away as cueing; the next sync tick flips it to on air. Same
+        # "observe, don't assume" rule as a track - on_air stays False until liquidsoap
+        # confirms it - it just spares clients a tick of the previous track lingering.
+        await self._show({**self.current_record, "on_air": False, "remaining": None})
+        return True
+
+    async def _finish_break(self, finished: dict) -> None:
+        logger.info(
+            "DJ break by %s - %d up / %d down",
+            finished.get("model", "?"),
+            len(self.like_votes),
+            len(self.skip_votes),
+        )
+        self._unlink_break()
+        self.favorited = False
+        self.like_votes.clear()
+        self.skip_votes.clear()
+        await self._go_idle()
+
+    def _discard_next_break(self) -> None:
+        clip, self._next_break = self._next_break, None
+        if clip is not None:
+            self._unlink_path(clip.local_path)
+
+    def _unlink_break(self) -> None:
+        self._unlink_path(self._break_local_path)
+        self._break_local_path = None
+
+    @staticmethod
+    def _unlink_path(path: Optional[str]) -> None:
+        if not path:
+            return
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def _sweep_break_cache(self) -> None:
+        """Delete clip files left behind by a crash. Anything the room still cares about
+        is at most a track long, so an hour is a wide margin."""
+        studio = self.dj_break
+        cache_dir = getattr(studio, "cache_dir", None)
+        if not cache_dir:
+            return
+        cutoff = time.time() - 3600
+        try:
+            for p in Path(cache_dir).glob("*.wav"):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    async def toggle_dj_breaks(self, user_id: str) -> None:
+        """Room-wide, any listener flips it - it's a property of the room, not a vote."""
+        if user_id not in self.users:
+            return
+        self.dj_breaks_enabled = not self.dj_breaks_enabled
+        if not self.dj_breaks_enabled:
+            self._discard_next_break()
+        logger.info(
+            "DJ breaks turned %s by %s",
+            "on" if self.dj_breaks_enabled else "off",
+            self._name_of(user_id),
+        )
+        await self._publish()
 
     async def _go_idle(self) -> None:
         # Nothing is on air, so the star/vote buttons have nothing to act on -
@@ -538,19 +801,33 @@ class Room:
         await self._publish()
 
     async def _skip_current(self):
-        logger.info("Skipping %r (%d vote(s))", self.now_playing.get("title") if self.now_playing else "?", len(self.skip_votes))
-        await self.liquidsoap.skip()
         # Drop our handle on the skipped request; the next sync tick will observe an
         # empty deck and start whatever is next. We don't assert what's playing here.
         skipped = self.current_record
-        self._record_played(skipped)
+        is_break = bool(skipped and skipped.get("kind") == "break")
+        if is_break:
+            logger.info("DJ break by %s skipped", skipped.get("model", "?"))
+        else:
+            logger.info(
+                "Skipping %r (%d vote(s))",
+                skipped.get("title") if skipped else "?",
+                len(self.skip_votes),
+            )
+        await self.liquidsoap.skip()
         self.current_rid = None
         self.current_record = None
         self.skip_votes.clear()
         self.like_votes.clear()
         self.favorited = False
-        # Nothing to push: the rating already came down as each skip vote landed,
-        # and a track voted off the air was never a real listen, so no scrobble.
+        if is_break:
+            self._unlink_break()
+        else:
+            # A skip is an impatient gesture - don't make people sit through a break to
+            # reach the song they asked for.
+            self._discard_next_break()
+            # Nothing to push: the rating already came down as each skip vote landed,
+            # and a track voted off the air was never a real listen, so no scrobble.
+            self._record_played(skipped)
         await self._go_idle()
 
     async def chat(self, user_id: str, text: str):
@@ -583,6 +860,7 @@ class Room:
                 self.play_history = saved.get("play_history", [])
                 self.known = saved.get("known", {})
                 self.favorited = saved.get("favorited", False)
+                self.dj_breaks_enabled = saved.get("dj_breaks_enabled", False)
                 self.track_stats = saved.get("track_stats", {})
 
                 # A restart disconnects everyone, so every restored DJ is offline
@@ -654,6 +932,8 @@ class Room:
             await self._sync_once()
         except LiquidsoapUnavailable:
             pass
+
+        self._sweep_break_cache()
 
     def start(self) -> None:
         if self._sync_task is None or self._sync_task.done():

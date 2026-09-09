@@ -82,6 +82,15 @@ Each of these looks like it could be simpler. Each was a bug that took real debu
 9. **Metadata parsing tolerates CRLF.** Liquidsoap's telnet ends lines with `\r\n`; a
    regex anchored to `"$` silently matches nothing against the real server while passing
    a naive test.
+10. **A DJ break is a pseudo-track, observed exactly like a real one** (cue → on air →
+   gone, same three reads). Its record carries `kind:"break"`; it is never scrobbled,
+   never added to `play_history` / `track_stats`. Generation (OpenRouter script → Piper
+   voice → WAV on the `/clips` volume) is best-effort and runs off the sync loop via
+   `_spawn` *while the previous track plays* — if the clip isn't ready at the gap, the
+   next song just plays. `radio.liq` and `liquidsoap_control.py` are unchanged: a break
+   is `queue.push` of a local file path instead of a Navidrome URL. The script prompt
+   also gets recent chat + a join/leave log (`room_events`) filtered to *since the last
+   break* (`_last_break_at`) — so enabling breaks sends chat and names to OpenRouter.
 
 ## Liquidsoap telnet
 

@@ -25,6 +25,11 @@ services:
       ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD}
       STREAM_BITRATE: ${STREAM_BITRATE:-320}
       ICECAST_PORT: ${ICECAST_PORT:-6491}
+    volumes:
+      # DJ break clips: the app writes them here, liquidsoap plays them by local path.
+      # Bind mount so `task dev`'s host-run app and this container see the same files;
+      # the deploy overlay swaps this for a named volume shared with the app container.
+      - ./dj-break-cache:/clips
     ports:
       # telnet control channel has no auth - only expose it to the host itself,
       # so a locally-run (non-docker) app process can reach it during dev
@@ -40,3 +45,15 @@ services:
       timeout: 3s
       retries: 12
       start_period: 5s
+
+  piper:
+    build:
+      context: ./piper
+      args:
+        PIPER_VOICE: ${PIPER_VOICE:-en_US-lessac-medium}
+    # Local text-to-speech for DJ breaks. Only the app talks to it; publish to the host
+    # loopback so `task dev`'s host-run app can reach it (same rationale as liquidsoap's
+    # telnet port). The deploy overlay drops this publish.
+    ports:
+      - "127.0.0.1:5000:5000"
+    restart: unless-stopped

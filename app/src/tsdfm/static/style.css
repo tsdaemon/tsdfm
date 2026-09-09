@@ -432,6 +432,10 @@ h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: upp
 #fav-btn { background: var(--panel); color: var(--muted); border: 1px solid var(--border); }
 #fav-btn.active { background: var(--fav); color: #2a0a1c; border-color: var(--fav); }
 
+/* DJ breaks - room-wide toggle, dim until on. */
+#dj-breaks-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+#dj-breaks-btn.active { color: var(--accent); border-color: var(--accent); }
+
 #listeners { color: var(--muted); font-size: 13px; }
 
 .error-text { color: var(--danger); font-size: 13px; margin-top: 6px; }

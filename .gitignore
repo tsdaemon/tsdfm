@@ -17,3 +17,8 @@ room-state.json
 
 .claude/worktrees
 app/cover-cache
+
+# Generated DJ break clips (runtime data), and the LLM prompt - gitignored so
+# friends' names / inside jokes stay private. See dj-break-prompt.txt.example.
+dj-break-cache/
+dj-break-prompt.txt

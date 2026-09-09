@@ -14,6 +14,12 @@ trick: there is one live stream and browsers tune into it.
 - **Genuinely synced** — one Icecast broadcast, so no drift between listeners
 - **Live chat** alongside the player
 - **Vote to skip** (majority of people in the room) and a like button
+- **DJ breaks** (optional) — a toggle in the UI puts a short AI-voiced line between songs,
+  like a radio host with a joke or a fun fact about the last track, and it can react to
+  recent chat or welcome someone who just joined. Script via OpenRouter (rotates models
+  so you can compare them), voice via a local Piper container — no per-use cost. Off
+  unless you set `OPENROUTER_API_KEY`; while it's on, recent chat and names go to the
+  script model (see `.env.example`).
 - **Search your own library** — Navidrome/Subsonic, including cover art
 - **Invite by link** — one shared link, no accounts, no signup
 - **A log panel in the UI** so you can see what's failing without SSHing anywhere

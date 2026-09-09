@@ -15,6 +15,10 @@ services:
         # not just for its container to start - otherwise room.resume() races it on
         # every redeploy. (resume() tolerates the race now too; this removes it.)
         condition: service_healthy
+      piper:
+        # DJ breaks are lazy, so this isn't load-bearing - it just avoids a warning
+        # window where the toggle is on but the voice service isn't up yet.
+        condition: service_started
     environment:
       NAVIDROME_URL: ${NAVIDROME_URL}
       NAVIDROME_USERNAME: ${NAVIDROME_USERNAME}
@@ -33,8 +37,20 @@ services:
       # Named volume, deliberately not a host path - matches the local-dev
       # rule of keeping every writer on its own STATE_PATH.
       STATE_PATH: /data/room-state.json
+      # DJ breaks. Inert unless OPENROUTER_API_KEY is set in .env.deploy. The app writes
+      # clips to /clips, a named volume the liquidsoap container also mounts. The prompt
+      # file lives on the room-state volume so no host bind mount is needed - drop a
+      # dj-break-prompt.txt there to override the built-in default.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODELS: ${OPENROUTER_MODELS:-openai/gpt-4o-mini,anthropic/claude-3.5-haiku}
+      PIPER_URL: http://piper:5000
+      DJ_BREAK_CACHE_DIR: /clips
+      DJ_BREAK_CLIPS_DIR: /clips
+      DJ_BREAK_EVERY_N: ${DJ_BREAK_EVERY_N:-1}
+      DJ_BREAK_PROMPT_FILE: /data/dj-break-prompt.txt
     volumes:
       - room-state:/data
+      - dj-break-cache:/clips
     ports:
       - "${APP_PORT:-6490}:${APP_PORT:-6490}"
     restart: unless-stopped
@@ -72,6 +88,15 @@ services:
     # reach it - here app is a container on the same compose network and
     # reaches it by service name (liquidsoap:1234), so drop the publish.
     ports: !reset []
+    # Swap the base file's ./dj-break-cache bind mount for the named volume the app
+    # container also mounts (deploy keeps every writer off host paths).
+    volumes: !override
+      - dj-break-cache:/clips
+
+  piper:
+    # Only the app talks to it, over the compose network - drop the host publish.
+    ports: !reset []
 
 volumes:
   room-state:
+  dj-break-cache:

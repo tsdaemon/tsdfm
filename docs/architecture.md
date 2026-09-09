@@ -56,6 +56,7 @@ addresses. Legacy artwork URLs in saved queues are converted when restored.
 | **app** (FastAPI) | Room state, DJ rotation, chat, invite auth, Navidrome search proxy | 8080 (`task dev`/Dockerfile default; deploy overrides to `APP_PORT`, default 6490) |
 | **liquidsoap** | Fetches + decodes tracks, encodes one continuous MP3 stream | 1234 (telnet, localhost only) |
 | **icecast** | Broadcasts that stream to listeners | `ICECAST_PORT`, default 6491 |
+| **piper** | Local text-to-speech for DJ breaks (only the app talks to it) | 5000 (HTTP, localhost only) |
 | **navidrome** | The music library (external — you run it separately) | 4533 |
 
 Liquidsoap's whole program is small enough to read at a glance:
@@ -184,6 +185,48 @@ Design notes, each of which is a bug that was actually hit:
   is still correct.
 - **Metadata parsing must tolerate CRLF.** Liquidsoap's telnet terminates lines with
   `\r\n`; a regex anchored to `"$` silently matches nothing against the real server.
+
+## DJ breaks
+
+An optional room-wide toggle (anyone in the room flips it, like the ★ button; persisted
+in room state). When on, the gap between two songs is filled with a short spoken line —
+an "AI DJ" with a joke or a fun fact about the track that just played.
+
+It reuses the whole track machinery rather than adding a parallel path:
+
+- **The break is a pseudo-track.** It goes on the *same* Liquidsoap queue via the *same*
+  `queue.push annotate:tsdfm_id="…":<uri>` — the only difference is the uri is a local
+  file (`/clips/<uuid>.wav`) instead of a signed Navidrome URL. It then moves through the
+  exact cue → on air → gone lifecycle above. Its record carries `kind:"break"`, and on
+  that basis it is never scrobbled and never enters `play_history` / `track_stats`.
+  `radio.liq` and `liquidsoap_control.py` did not change.
+- **Two services, both best-effort, both off the sync loop.** An LLM writes the line
+  (via **OpenRouter**, so several models can be rotated and compared — the model that
+  answered is logged and shown in the room's chat), then **Piper** — a local,
+  self-hosted container, no API key, no per-use cost — voices it to WAV.
+- **The prompt gets room colour.** Alongside the two tracks, the script request carries
+  what has happened *since the last break*: recent chat lines (with display names) and a
+  short event log (joins, leaves, step-ups — `Room.room_events`). So enabling breaks
+  means recent chat and names are sent to the configured OpenRouter model; the prompt
+  file (`DJ_BREAK_PROMPT_FILE`) is where you set the tone for how that's used.
+- **Generated ahead of the gap.** When a track goes on air the room `_spawn`s the
+  generation for the *upcoming* gap; the clip is usually ready minutes before it's
+  needed. If it isn't ready when the track ends — or the toggle is off, or there's no
+  next song to lead into — the next track simply plays. Nothing blocks.
+- **The clip file is shared with Liquidsoap by volume, not HTTP.** The app writes to
+  `DJ_BREAK_CACHE_DIR`; the Liquidsoap container mounts the same files at `/clips`
+  (`./dj-break-cache` bind mount in `task dev`, a named volume in the deploy). No new
+  HTTP surface, and the files are inspectable with `ls`. A clip is deleted once it has
+  played; `resume()` sweeps anything older than an hour left by a crash.
+- **Thumbs up / thumbs down act on the break itself.** No new controls: a like just
+  tallies (a break has no Navidrome track, so no rating side effect) and is logged with
+  the model on break end; **one** thumbs-down skips the break immediately — short filler
+  doesn't need a majority, and it's the escape hatch if a clip hangs. Skipping a *track*
+  with a break already prepared throws the break away — a skip means "get to the next
+  song now".
+
+Inert without `OPENROUTER_API_KEY`: the toggle still shows and persists, breaks just
+never generate.
 
 ## Room state machine
 
@@ -413,6 +456,7 @@ All via `.env` (see `.env.example`):
 | `APP_PUBLIC_URL` | `task invite` / `task deploy:invite` | Only so the invite link prints in full - the *public*-facing URL, whatever fronts it |
 | `APP_HOSTNAME` | `task deploy` only | LAN-local hostname Traefik routes to the app over plain HTTP; lives in `.env.deploy`, not `.env` |
 | `DEPLOY_INVITE_TOKEN` | `task deploy` only | The deployed room's invite secret - a separate key from `INVITE_TOKEN` on purpose, see below |
+| `OPENROUTER_API_KEY` | app | Enables DJ breaks; unset = feature inert (toggle still shows). See `.env.example` for `OPENROUTER_MODELS`, `PIPER_URL`, `DJ_BREAK_*` |
 
 `task deploy` reads `.env.deploy` instead of `.env` (see `.env.deploy.example`) — kept
 separate so a local test setup and the real NAS's credentials/hostname never have to share
@@ -435,12 +479,15 @@ app/                      uv project (src layout)
     state.py              Room: rotation, queues, votes, advance loop
     navidrome.py          Subsonic client: search, stream/cover URLs
     liquidsoap_control.py telnet client: push / skip / remaining
+    dj_break.py           DJ breaks: OpenRouter script -> Piper voice -> WAV clip
     static/               the whole frontend (vanilla JS, no build step)
   tests/unit/             fast, no services
   tests/e2e/              needs a running stack
 icecast/                  Dockerfile + config template
 liquidsoap/               Dockerfile + radio.liq
-docker-compose.yml        icecast + liquidsoap — used by task dev, and as the base for deploy
+piper/                    Dockerfile — local text-to-speech for DJ breaks
+dj-break-prompt.txt.example  copy to dj-break-prompt.txt to customise the DJ's prompt
+docker-compose.yml        icecast + liquidsoap + piper — task dev, and the base for deploy
 docker-compose.deploy.yml overlay: adds app + Traefik/Homepage labels — used by task deploy
 docs/architecture.md      this file
 ```

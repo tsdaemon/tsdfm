@@ -17,13 +17,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from tsdfm.cover_cache import CoverCache
+from tsdfm.dj_break import DjBreakStudio
 from tsdfm.liquidsoap_control import LiquidsoapControl
 from tsdfm.navidrome import NavidromeClient
 from tsdfm.state import Room, Track, User
 from tsdfm.auth import COOKIE, MAX_AGE, issue_session, valid_session, session_from_cookie
 
 # Only fills gaps in os.environ, so docker-compose's own environment values always win.
-load_dotenv(find_dotenv(usecwd=True))
+_DOTENV = find_dotenv(usecwd=True)
+load_dotenv(_DOTENV)
+# `task dev` runs the app with its cwd inside app/, so relative runtime paths would land
+# there. Anchor DJ break paths to the repo root (where .env and dj-break-prompt.txt live)
+# instead; in Docker there is no .env file and the env vars are set explicitly anyway.
+_ROOT = Path(_DOTENV).parent if _DOTENV else Path.cwd()
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -76,6 +82,25 @@ STATS_API_TOKEN = os.environ.get("STATS_API_TOKEN", "")
 # Sits on the same volume as the room state by default, so the deploy needs no
 # extra mount. Cover art is tiny; the cap is a guard against unbounded growth.
 COVER_CACHE_DIR = Path(os.environ.get("COVER_CACHE_DIR", STATE_PATH.parent / "cover-cache"))
+
+# DJ breaks (short spoken bits between songs). Inert without OPENROUTER_API_KEY - the UI
+# toggle still works, breaks just never get generated.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY") or None
+OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODELS = [
+    m.strip() for m in os.environ.get(
+        "OPENROUTER_MODELS", "openai/gpt-4o-mini,anthropic/claude-3.5-haiku"
+    ).split(",") if m.strip()
+]
+PIPER_URL = os.environ.get("PIPER_URL", "http://localhost:5000")
+# Where this process writes clips; DJ_BREAK_CLIPS_DIR is the path the *same* files are at
+# inside the liquidsoap container (its /clips mount). The two strings differ under
+# `task dev` (a repo-root dir vs /clips); in Docker both are just /clips.
+DJ_BREAK_CACHE_DIR = Path(os.environ.get("DJ_BREAK_CACHE_DIR") or (_ROOT / "dj-break-cache"))
+DJ_BREAK_CLIPS_DIR = os.environ.get("DJ_BREAK_CLIPS_DIR", "/clips")
+DJ_BREAK_EVERY_N = int(os.environ.get("DJ_BREAK_EVERY_N", "1"))
+DJ_BREAK_MAX_WORDS = int(os.environ.get("DJ_BREAK_MAX_WORDS", "40"))
+DJ_BREAK_PROMPT_FILE = Path(os.environ.get("DJ_BREAK_PROMPT_FILE") or (_ROOT / "dj-break-prompt.txt"))
 
 
 @asynccontextmanager
@@ -159,6 +184,20 @@ navidrome = NavidromeClient(NAVIDROME_URL, NAVIDROME_USERNAME, NAVIDROME_PASSWOR
 cover_cache = CoverCache(COVER_CACHE_DIR)
 liquidsoap = LiquidsoapControl(LIQUIDSOAP_HOST, LIQUIDSOAP_PORT)
 
+dj_break = DjBreakStudio(
+    openrouter_url=OPENROUTER_URL,
+    api_key=OPENROUTER_API_KEY,
+    models=OPENROUTER_MODELS,
+    piper_url=PIPER_URL,
+    cache_dir=DJ_BREAK_CACHE_DIR,
+    clips_dir=DJ_BREAK_CLIPS_DIR,
+    max_words=DJ_BREAK_MAX_WORDS,
+    every_n=DJ_BREAK_EVERY_N,
+    prompt_file=DJ_BREAK_PROMPT_FILE,
+)
+if not dj_break.enabled:
+    logger.info("DJ breaks disabled: set OPENROUTER_API_KEY to enable them")
+
 active_sockets: dict[str, WebSocket] = {}
 
 
@@ -174,7 +213,8 @@ async def broadcast(message: dict):
 
 
 room = Room(
-    liquidsoap=liquidsoap, navidrome=navidrome, broadcast=broadcast, state_path=STATE_PATH
+    liquidsoap=liquidsoap, navidrome=navidrome, broadcast=broadcast, state_path=STATE_PATH,
+    dj_break=dj_break,
 )
 
 
@@ -358,6 +398,8 @@ async def ws_endpoint(websocket: WebSocket):
                 await room.vote_like(user_id)
             elif mtype == "toggle_favorite":
                 await room.toggle_favorite(user_id)
+            elif mtype == "toggle_dj_breaks":
+                await room.toggle_dj_breaks(user_id)
 
     except WebSocketDisconnect:
         pass

@@ -166,6 +166,7 @@ const state = {
   logs: [],
   votes: { skip: 0, skipNeeded: 1, like: 0 },
   favorited: false,      // current track starred in Navidrome
+  djBreaksEnabled: false, // room-wide: AI DJ patter between songs
   view: "room",
   libraryDraft: "",
   library: { kind: "alphabeticalByName", query: "", offset: 0, albums: [], album: null, songs: [], artists: [], artist: null, stats: null, loading: false, loaded: false, error: "" },
@@ -219,6 +220,7 @@ function render() {
   renderLogs();
   renderSearch();
   renderVotes();
+  renderDjBreaks();
   renderLibrary();
   renderLibraryQueue();
   renderToast();
@@ -350,6 +352,17 @@ function renderNowPlaying() {
     meta.textContent = "Step up to DJ and queue a track to get things started.";
     art.style.display = "none";
     liveDot.style.display = "none";
+    pos.textContent = "";
+    fill.style.width = "0%";
+    return;
+  }
+
+  if (np.kind === "break") {
+    // An AI DJ line between songs - no artwork, no progress against a track duration.
+    title.textContent = "📻 DJ break";
+    meta.textContent = np.text || "";
+    art.style.display = "none";
+    liveDot.style.display = np.on_air ? "inline-block" : "none";
     pos.textContent = "";
     fill.style.width = "0%";
     return;
@@ -863,8 +876,18 @@ function renderVotes() {
   $("skip-needed").textContent = state.votes.skipNeeded;
   $("like-count").textContent = state.votes.like;
   const fav = $("fav-btn");
+  // Favouriting is a Navidrome track property - meaningless during a DJ break.
+  fav.hidden = state.nowPlaying?.kind === "break";
   fav.classList.toggle("active", state.favorited);
   fav.setAttribute("aria-pressed", state.favorited ? "true" : "false");
+}
+
+// Room-wide toggle, any listener can flip it. Same thumbs up / thumbs down then act on
+// the break itself (thumbs-down is a one-click skip, handy if a clip hangs).
+function renderDjBreaks() {
+  const btn = $("dj-breaks-btn");
+  btn.classList.toggle("active", state.djBreaksEnabled);
+  btn.setAttribute("aria-pressed", state.djBreaksEnabled ? "true" : "false");
 }
 
 // Fire-and-forget actions (queueing a track) get no echo of their own from the
@@ -928,6 +951,7 @@ async function connect() {
           like: msg.like_votes,
         },
         favorited: !!msg.favorited,
+        djBreaksEnabled: !!msg.dj_breaks_enabled,
       });
     } else if (msg.type === "progress") {
       // Countdown only - carries no track identity, so patch rather than replace.
@@ -1262,6 +1286,7 @@ $("dj-toggle").addEventListener("click", () => send({ type: isDj() ? "step_down"
 $("skip-btn").addEventListener("click", () => send({ type: "vote_skip" }));
 $("like-btn").addEventListener("click", () => send({ type: "vote_like" }));
 $("fav-btn").addEventListener("click", () => send({ type: "toggle_favorite" }));
+$("dj-breaks-btn").addEventListener("click", () => send({ type: "toggle_dj_breaks" }));
 $("chat-send").addEventListener("click", sendChat);
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendChat();

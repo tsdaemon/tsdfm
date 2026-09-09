@@ -6,6 +6,7 @@ drive the same fake liquidsoap without one importing the other.
 
 import asyncio
 
+from tsdfm.dj_break import BreakClip
 from tsdfm.liquidsoap_control import LiquidsoapUnavailable
 from tsdfm.state import Room, Track
 
@@ -111,7 +112,35 @@ class FakeNavidrome:
         self.ratings[song_id] = value
 
 
-def make_room(liquidsoap=None, state_path=None):
+class FakeDjBreak:
+    """Stands in for DjBreakStudio: no network, hands back a canned clip (or None).
+
+    `produce=False` models the LLM or Piper being down. The model name rotates per call
+    so a test can prove breaks from different models are told apart.
+    """
+
+    def __init__(self, produce=True, every_n=1, enabled=True):
+        self.enabled = enabled
+        self.every_n = every_n
+        self.cache_dir = None
+        self.produce = produce
+        self.calls = []                 # (just_played, coming_up, context) per call
+        self._models = ["fake/model-a", "fake/model-b"]
+
+    async def script_and_voice(self, just_played, coming_up, context=None):
+        self.calls.append((just_played, coming_up, context))
+        if not self.produce:
+            return None
+        model = self._models[(len(self.calls) - 1) % len(self._models)]
+        return BreakClip(
+            path=f"/clips/fake-{len(self.calls)}.wav",
+            local_path=f"/tmp/tsdfm-test-nonexistent-{len(self.calls)}.wav",
+            text=f"Fun fact about {just_played.get('title')}.",
+            model=model,
+        )
+
+
+def make_room(liquidsoap=None, state_path=None, dj_break=None):
     broadcasts = []
 
     async def broadcast(msg):
@@ -122,6 +151,7 @@ def make_room(liquidsoap=None, state_path=None):
         navidrome=FakeNavidrome(),
         broadcast=broadcast,
         state_path=state_path,
+        dj_break=dj_break,
     )
     return room, broadcasts
 
