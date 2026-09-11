@@ -1,0 +1,1 @@
+Idea: listen a song a bit before adding it to the queue.

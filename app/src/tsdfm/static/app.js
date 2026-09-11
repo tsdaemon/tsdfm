@@ -66,6 +66,27 @@ function formatClock(epochSeconds) {
   });
 }
 
+// Calendar-day identity (viewer's local time) for grouping chat messages into day separators.
+function chatDayKey(epochSeconds) {
+  const d = new Date(epochSeconds * 1000);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+// "Today" / "Yesterday" / full date label for a chat day separator.
+function formatChatDay(epochSeconds) {
+  const d = new Date(epochSeconds * 1000);
+  const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const diffDays = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  return d.toLocaleDateString([], {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: d.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined,
+  });
+}
+
 function setArt(imgEl, url) {
   imgEl.onerror = () => {
     imgEl.onerror = null;
@@ -202,7 +223,15 @@ function myQueue() {
 // Private to the render layer: lets list renderers animate only genuinely new rows
 // instead of replaying every entrance on unrelated state changes. Never read by
 // anything outside render().
-const memo = { djQueueLengths: {}, myQueueLength: 0, libQueueLength: 0, chatCount: 0, logCount: 0 };
+const memo = {
+  djQueueLengths: {},
+  myQueueLength: 0,
+  libQueueLength: 0,
+  chatCount: 0,
+  logCount: 0,
+  chatTopDay: null,
+  chatTopDaySeparator: null,
+};
 
 function render() {
   document.documentElement.dataset.theme = state.theme;
@@ -577,11 +606,16 @@ function renderHistory() {
 // Chat and logs only ever grow, so they prepend rather than rebuild - rebuilding
 // would restart every entrance animation and fight the user's scroll position.
 // Newest entries render at the top, so each new batch is prepended in order.
+// A separator only ever needs to move (not be recreated) when a new message
+// extends the day-group currently at the top of the list, since messages
+// arrive in chronological order and `prepend` always lands above it.
 function renderChat() {
   const log = $("chat-log");
   if (state.chat.length < memo.chatCount) {
     log.innerHTML = "";
     memo.chatCount = 0;
+    memo.chatTopDay = null;
+    memo.chatTopDaySeparator = null;
   }
   for (const msg of state.chat.slice(memo.chatCount)) {
     const li = document.createElement("li");
@@ -594,6 +628,20 @@ function renderChat() {
     }
     li.innerHTML = `${stamp}<span class="user">${avatar}${escapeHtml(msg.user)}</span>${escapeHtml(msg.text)}`;
     log.prepend(li);
+
+    if (msg.ts) {
+      const day = chatDayKey(msg.ts);
+      if (day === memo.chatTopDay && memo.chatTopDaySeparator) {
+        log.prepend(memo.chatTopDaySeparator);
+      } else {
+        const sep = document.createElement("li");
+        sep.className = "chat-day-separator enter";
+        sep.textContent = formatChatDay(msg.ts);
+        log.prepend(sep);
+        memo.chatTopDay = day;
+        memo.chatTopDaySeparator = sep;
+      }
+    }
   }
   if (state.chat.length !== memo.chatCount) log.scrollTop = 0;
   memo.chatCount = state.chat.length;
