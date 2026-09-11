@@ -37,6 +37,13 @@
 
   const vizCanvas = $("viz-bg");
 
+  // Tapping the element via createMediaElementSource is a one-way door (see the
+  // long comment in armVisualizer()) - on mobile, a stuck-suspended AudioContext
+  // has been seen to silence playback entirely with no way back. Desktop doesn't
+  // carry that risk in practice, so the cosmetic spectrum display is worth it
+  // there; on mobile it isn't worth risking the radio going silent for it.
+  const vizIsMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
   const vizSameOrigin = (() => {
     try {
       const src = radioAudio.getAttribute("src") || "";
@@ -44,7 +51,7 @@
     } catch { return false; }
   })();
   const vizCredentialed = radioAudio.crossOrigin === "use-credentials";
-  const vizCanUse = vizSameOrigin || vizCredentialed;
+  const vizCanUse = !vizIsMobile && (vizSameOrigin || vizCredentialed);
 
   // Cross-origin + crossOrigin opt-in: don't trust the tap until playback has
   // actually started, and bail out cleanly if the CORS handshake fails.
@@ -67,6 +74,7 @@
 
   let vizCtx = null;         // AudioContext
   let vizAnalyser = null;
+  let vizGain = null;        // GainNode - the real volume control once tapped, see below
   let vizSource = null;      // MediaElementAudioSourceNode - created once, ever
   let vizG = null;           // canvas 2d context
   let vizFreq = null;        // Uint8Array, frequency bins
@@ -307,18 +315,28 @@
     applyVizSetting();
   }
 
-  function initVisualizer() {
+  // Takes an already-running AudioContext - see armVisualizer() for why it must
+  // already be running before this ever touches the element.
+  function initVisualizer(ctx) {
     if (vizSource) return;  // createMediaElementSource is one-shot per element
-    if (!window.AudioContext || !vizCanvas || !vizCanUse || !vizCorsOk) return;
+    if (!vizCanvas) return;
     try {
-      vizCtx = new AudioContext();
+      vizCtx = ctx;
       vizSource = vizCtx.createMediaElementSource(radioAudio);
       vizAnalyser = vizCtx.createAnalyser();
       vizAnalyser.fftSize = 2048;
       vizAnalyser.smoothingTimeConstant = 0.82;
-      // The element must still reach the speakers: source -> analyser -> output.
+      // Once tapped, the element's own `.volume` no longer reaches the output in any
+      // browser - the raw decoded audio goes straight into this graph instead. A
+      // GainNode is the only thing that still attenuates it, so the volume slider is
+      // wired to this (see tsdfmSetGain below), seeded from the slider's current value.
+      vizGain = vizCtx.createGain();
+      const slider = $("volume-slider");
+      vizGain.gain.value = slider ? parseFloat(slider.value) : 1;
+      // source -> analyser -> gain -> output.
       vizSource.connect(vizAnalyser);
-      vizAnalyser.connect(vizCtx.destination);
+      vizAnalyser.connect(vizGain);
+      vizGain.connect(vizCtx.destination);
     } catch (err) {
       console.warn("visualizer unavailable:", err);
       return;
@@ -343,15 +361,31 @@
   // gesture, so hold off until the first interaction AND until any pending CORS
   // check has cleared (vizCorsOk). Either trigger calls armVisualizer(); it acts
   // only once both are true, and is a no-op after the first successful init.
+  //
+  // createMediaElementSource() is a one-way door: the instant it's called, the
+  // element's audio stops reaching the speakers directly and only flows through
+  // this AudioContext instead. If that context never reaches "running" (seen in
+  // the wild on some Android browsers - it silently stays "suspended" even after
+  // resume()), the listener gets total silence with no way back, for a cosmetic
+  // spectrum display. So resume() is confirmed *before* the tap, not after -
+  // if it doesn't come back "running", the tap is skipped entirely and the
+  // element keeps playing exactly as it did before viz existed.
   let vizGestured = false;
+  let vizArmAttempted = false;
   function armVisualizer() {
-    if (!vizGestured || !vizCorsOk) return;
-    initVisualizer();
-    if (!vizCtx) return;
-    if (vizCtx.state === "suspended") vizCtx.resume();
+    if (!vizGestured || !vizCorsOk || vizArmAttempted) return;
+    if (!window.AudioContext || !vizCanvas || !vizCanUse) return;
+    vizArmAttempted = true;
     for (const ev of ["pointerdown", "keydown", "touchstart"]) {
       document.removeEventListener(ev, onVizGesture);
     }
+    const ctx = new AudioContext();
+    const proceedIfRunning = () => {
+      if (ctx.state !== "running") { try { ctx.close(); } catch {} return; }
+      initVisualizer(ctx);
+    };
+    if (ctx.state === "running") proceedIfRunning();
+    else ctx.resume().then(proceedIfRunning, proceedIfRunning);
   }
   function onVizGesture() {
     vizGestured = true;
@@ -362,6 +396,10 @@
       document.addEventListener(ev, onVizGesture, { passive: true });
     }
   }
+
+  // Called from app.js's volume slider. Once the graph exists, this is the only
+  // thing that actually changes what's heard - see the comment in initVisualizer().
+  window.tsdfmSetGain = (v) => { if (vizGain) vizGain.gain.value = v; };
 
   buildVizMenu();
 })();

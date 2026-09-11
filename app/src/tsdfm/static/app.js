@@ -574,8 +574,9 @@ function renderHistory() {
   memo.historyPage = state.historyPage;
 }
 
-// Chat and logs only ever grow, so they append rather than rebuild - rebuilding
+// Chat and logs only ever grow, so they prepend rather than rebuild - rebuilding
 // would restart every entrance animation and fight the user's scroll position.
+// Newest entries render at the top, so each new batch is prepended in order.
 function renderChat() {
   const log = $("chat-log");
   if (state.chat.length < memo.chatCount) {
@@ -592,9 +593,9 @@ function renderChat() {
       stamp = `<time class="chat-ts" datetime="${d.toISOString()}" title="${escapeHtml(d.toLocaleString())}">${escapeHtml(formatClock(msg.ts))}</time> `;
     }
     li.innerHTML = `${stamp}<span class="user">${avatar}${escapeHtml(msg.user)}</span>${escapeHtml(msg.text)}`;
-    log.appendChild(li);
+    log.prepend(li);
   }
-  if (state.chat.length !== memo.chatCount) log.scrollTop = log.scrollHeight;
+  if (state.chat.length !== memo.chatCount) log.scrollTop = 0;
   memo.chatCount = state.chat.length;
 }
 
@@ -609,9 +610,9 @@ function renderLogs() {
     li.className = `level-${entry.level} enter`;
     const time = new Date(entry.ts * 1000).toLocaleTimeString();
     li.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(entry.message)}`;
-    panel.appendChild(li);
+    panel.prepend(li);
   }
-  if (state.logs.length !== memo.logCount) panel.scrollTop = panel.scrollHeight;
+  if (state.logs.length !== memo.logCount) panel.scrollTop = 0;
   memo.logCount = state.logs.length;
 }
 
@@ -1237,14 +1238,19 @@ muteBtn.addEventListener("click", () => {
   if (radioAudio.volume === 0) {
     radioAudio.volume = 1;
     volumeSlider.value = "1";
+    window.tsdfmSetGain?.(1);
   }
   ensurePlaying();
 });
 
 volumeSlider.addEventListener("input", () => {
-  radioAudio.volume = parseFloat(volumeSlider.value);
+  const v = parseFloat(volumeSlider.value);
+  radioAudio.volume = v;
+  // Once the visualizer has tapped the element, `.volume` no longer reaches the
+  // speakers in any browser - this is what actually changes the level then.
+  window.tsdfmSetGain?.(v);
   // Dragging the slider up is an unambiguous "I want sound".
-  if (radioAudio.volume > 0) radioAudio.muted = false;
+  if (v > 0) radioAudio.muted = false;
   ensurePlaying();
 });
 
